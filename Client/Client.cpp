@@ -1,13 +1,12 @@
 /* Start Header
 *****************************************************************/
 /*!
-\file echoclient.cpp
-\author Lai Jun Jie Clement (junjieclement.lai@digipen.edu)
+\file client.cpp
+\author 
 \par
-\date 21st Jan 2025
+\date 
 \brief
-This file implements the client file which will be used to implement a
-simple echo client.
+
 Copyright (C) 2026 DigiPen Institute of Technology.
 Reproduction or disclosure of this file or its contents without the
 prior written consent of DigiPen Institute of Technology is prohibited.
@@ -23,9 +22,9 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 #include "winsock2.h"		// ...or Winsock alone
 #include "ws2tcpip.h"		// getaddrinfo()
 
- // Tell the Visual Studio linker to include the following library in linking.
- // Alternatively, we could add this file to the linker command-line parameters,
- // but including it in the source code simplifies the configuration.
+// Tell the Visual Studio linker to include the following library in linking.
+// Alternatively, we could add this file to the linker command-line parameters,
+// but including it in the source code simplifies the configuration.
 #pragma comment(lib, "ws2_32.lib")
 
 #include <iostream>			// cout, cerr
