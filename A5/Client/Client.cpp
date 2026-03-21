@@ -1,12 +1,15 @@
 /* Start Header
 *****************************************************************/
 /*!
-\file client.cpp
-\author 
+\file Client.cpp
+\authors
+\   Lai Jun Jie Clement (junjieclement.lai@digipen.edu)
+\   Aryan bin Mohamed Isran (aryan.b@digipen.edu)
+\   Lee Hwee Min (l.hweemin@digipen.edu)
 \par
 \date 
-\brief
-
+\brief 
+\
 Copyright (C) 2026 DigiPen Institute of Technology.
 Reproduction or disclosure of this file or its contents without the
 prior written consent of DigiPen Institute of Technology is prohibited.

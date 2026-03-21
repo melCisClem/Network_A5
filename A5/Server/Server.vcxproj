@@ -13,8 +13,8 @@
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
-    <ProjectGuid>{05b78450-ab03-4115-acc1-b3fa60714e4d}</ProjectGuid>
-    <RootNamespace>Client</RootNamespace>
+    <ProjectGuid>{73a43b92-b600-4091-8015-238174acc53f}</ProjectGuid>
+    <RootNamespace>Server</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -54,14 +54,9 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
-    <CustomBuildStep>
-      <Outputs>
-      </Outputs>
-    </CustomBuildStep>
     <PostBuildEvent>
       <Command>if not exist "$(SolutionDir)..\build" mkdir "$(SolutionDir)..\build"
-
-copy /Y "$(TargetPath)" "$(SolutionDir)..\build\"</Command>
+copy /Y "$(TargetPath)" "$(SolutionDir)..\build"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -77,18 +72,17 @@ copy /Y "$(TargetPath)" "$(SolutionDir)..\build\"</Command>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
-    <CustomBuildStep>
-      <Outputs>
-      </Outputs>
-    </CustomBuildStep>
     <PostBuildEvent>
       <Command>if not exist "$(SolutionDir)..\build" mkdir "$(SolutionDir)..\build"
-
-copy /Y "$(TargetPath)" "$(SolutionDir)..\build\"</Command>
+copy /Y "$(TargetPath)" "$(SolutionDir)..\build"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="Client.cpp" />
+    <ClCompile Include="Server.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="taskqueue.h" />
+    <ClInclude Include="taskqueue.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
