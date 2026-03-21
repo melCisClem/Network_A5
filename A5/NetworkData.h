@@ -24,8 +24,17 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 #pragma pack(push, 1)
 struct GameStatePacket {
     uint32_t sequenceNum; // To ignore out-of-order older packets
-    float playerX;
-    float playerY;
+    float p0X, p0Y;
+    float p1X, p1Y;
+};
+
+struct InputPacket {
+    uint32_t sequenceNum;
+    uint32_t playerID;
+    bool w_pressed;
+    bool a_pressed;
+    bool s_pressed;
+    bool d_pressed;
 };
 #pragma pack(pop)
 
