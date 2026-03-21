@@ -247,6 +247,24 @@ static std::vector<std::string> GetLocalIPv4Addresses(void)
 bool execute(SOCKET clientSocket);
 void disconnect(SOCKET& listenerSocket);
 
+/**
+* @brief get file list
+* @return std::vector<std::string>
+*/
+static std::vector<std::string> getFileList(void)
+{
+    std::vector<std::string> files;
+    try {
+        for (auto& entry : fs::directory_iterator(g_serverPath))
+            if (entry.is_regular_file())
+                files.push_back(entry.path().filename().string());
+        std::sort(files.begin(), files.end());
+    }
+    catch (const std::exception& e) {
+        std::cerr << "[Server] Error listing files: " << e.what() << std::endl;
+    }
+    return files;
+}
 
 /**
 * @brief UDP ACK reciever thread
@@ -304,6 +322,120 @@ static void udpAckReceiverThread(void)
             }
             sd->cv.notify_one();
         }
+    }
+}
+
+/**
+* @brief UDP sender thread is stop n wait so it sends 1 chunk then wait for ACK then advance
+* @param uint32_t sessionID, SOCKET tcpSocket, sockaddr_in clientAddr, fs::path filePath, uint32_t fileSize
+*/
+static void udpSenderThread(uint32_t sessionID, SOCKET tcpSocket, sockaddr_in clientAddr, fs::path filePath, uint32_t fileSize)
+{
+    auto sendError = [&]() {
+        char errCmd = static_cast<char>(DOWNLOAD_ERROR);
+        if (!sendAll(tcpSocket, &errCmd, 1))
+            std::cerr << "[Session " << sessionID << "] DOWNLOAD_ERROR not delivered (client already disconnected)\n";
+        else
+            std::cerr << "[Session " << sessionID << "] DOWNLOAD_ERROR sent to client.\n";
+        };
+
+    SessionData sd;
+    {
+        std::lock_guard<std::mutex> lk(g_sessionsMtx);
+        g_sessions[sessionID] = &sd;
+    }
+
+    std::ifstream fin;
+    if (fileSize > 0)
+    {
+        fin.open(filePath, std::ios::binary);
+        if (!fin)
+        {
+            std::cerr << "[Session " << sessionID << "] Cannot open file for streaming: " << filePath << std::endl;
+            sendError();
+
+            std::lock_guard<std::mutex> lk(g_sessionsMtx);
+            g_sessions.erase(sessionID);
+            return;
+        }
+    }
+
+    int addrLen = sizeof(clientAddr);
+    uint32_t offset = 0;
+    uint32_t seqNum = 0;
+    bool allOK = true;
+
+    // stop n wait loop
+    do
+    {
+        uint32_t chunk = (fileSize == 0) ? 0u : std::min((uint32_t)UDP_CHUNK_SIZE, fileSize - offset);
+
+        // build datagram
+        std::vector<char> pkt(sizeof(UDPHeader) + chunk);
+        auto* hdr = reinterpret_cast<UDPHeader*>(pkt.data());
+        hdr->sessionID = htonl(sessionID);
+        hdr->fileLength = htonl(fileSize);
+        hdr->fileOffset = htonl(offset);
+        hdr->dataLength = htonl(chunk);
+        hdr->flags = 0x00;
+        hdr->seqNum = htonl(seqNum);
+        hdr->ackNum = 0;
+
+        if (chunk > 0)
+        {
+            fin.read(pkt.data() + sizeof(UDPHeader), chunk);
+            if (static_cast<uint32_t>(fin.gcount()) != chunk)
+            {
+                std::cerr << "[Session " << sessionID << "] Short read at offset " << offset << std::endl;
+                sendError();
+                allOK = false;
+                break;
+            }
+        }
+
+        // retransmit till get ACK or hit max reties 
+        bool acked = false;
+        for (int retry = 0; retry <= MAX_RETRIES; ++retry)
+        {
+            sendto(g_serverUDPSocket, pkt.data(), (int)pkt.size(), 0, reinterpret_cast<sockaddr*>(&clientAddr), addrLen);
+
+            if (retry == 0)
+                std::cout << "[Session " << sessionID << "] seq=" << seqNum << " off=" << offset << " sz=" << chunk << std::endl;
+            else if (retry % RETRY_LOG_INTERVAL == 0)
+                std::cout << "[Session " << sessionID << "] RETRY " << retry << "/" << MAX_RETRIES << " seq=" << seqNum << std::endl;
+
+            std::unique_lock<std::mutex> ul(sd.mtx);
+            bool got = sd.cv.wait_for(ul, std::chrono::milliseconds(UDP_TIMEOUT_MS), [&] {
+                return sd.newAck && sd.lastAckSeq == seqNum;
+                });
+
+            sd.newAck = false;
+            if (got)
+            {
+                acked = true;
+                break;
+            }
+        }
+
+        if (!acked)
+        {
+            std::cerr << "[Session " << sessionID << "] TIMED OUT after " << MAX_RETRIES << " retries at seq=" << seqNum << " sending DOWNLOAD_ERROR to client." << std::endl;
+            sendError();
+            allOK = false;
+            break;
+        }
+
+        offset += chunk;
+        ++seqNum;
+
+    } while (offset < fileSize && fileSize > 0);
+
+    if (allOK)
+        std::cout << "[Sesion " << sessionID << "] Transfer complete (" << fileSize << " bytes)" << std::endl;
+
+    {
+        std::lock_guard<std::mutex> lk(g_sessionsMtx);
+        g_sessions.erase(sessionID);
     }
 }
 
