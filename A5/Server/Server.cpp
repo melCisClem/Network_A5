@@ -42,19 +42,21 @@ SOCKET g_serverUDPSocket = INVALID_SOCKET;
 
 struct Player {
     sockaddr_in udpAddr{};
-    bool connected = false;
     float x = 10.0f, y = 10.0f;
+    float aimAngle = 0.0f;
+    int shootCooldown = 0;
+    int hp = 100;
+    bool connected = false;
     bool up = false, down = false, left = false, right = false;
     bool space = false;
-    int shootCooldown = 0;
-    float aimAngle = 0.0f;
 };
 
 struct Projectile {
-    bool active = false;
     float x = 0.0f, y = 0.0f;
     float vx = 0.0f, vy = 0.0f;
+    int ownerID = -1;
     int lifeTimer = 0;
+    bool active = false;
 };
 
 std::mutex g_stateMtx;
@@ -160,6 +162,7 @@ void serverGameLoop() {
                             if (!g_projectiles[j].active) {
                                 g_projectiles[j].active = true;
                                 g_projectiles[j].lifeTimer = 120; // 60 * 2 ticks
+                                g_projectiles[j].ownerID = i;
 
                                 float gunOffset = tank_width + tank_gunLength;
                                 g_projectiles[j].x = g_players[i].x + cos(rad) * gunOffset;
@@ -184,8 +187,33 @@ void serverGameLoop() {
                     g_projectiles[j].y += g_projectiles[j].vy;
                     g_projectiles[j].lifeTimer--;
 
+                    bool hitPlayer = false;
+
+                    // check if projectile hit other player
+                    for (int p = 0; p < MAX_PLAYERS; p++) {
+                        // cant hit ownself n dead players
+                        if (g_players[p].connected && p != g_projectiles[j].ownerID && g_players[p].hp > 0) {
+
+                            float dx = g_projectiles[j].x - g_players[p].x;
+                            float dy = g_projectiles[j].y - g_players[p].y;
+
+                            if ((dx * dx + dy * dy) < (0.06f * 0.06f)) {
+                                g_players[p].hp -= BULLET_DAMAGE;
+
+                                // respawn
+                                if (g_players[p].hp <= 0) {
+                                    g_players[p].x = 0.0f; // Respawn in the middle of the map
+                                    g_players[p].y = 0.0f;
+                                    g_players[p].hp = MAX_HP;
+                                }
+                                hitPlayer = true;
+                                break;
+                            }
+                        }
+                    }
+
                     // kill old proj
-                    if (g_projectiles[j].lifeTimer <= 0 || isWall(g_projectiles[j].x, g_projectiles[j].y))
+                    if (g_projectiles[j].lifeTimer <= 0 || isWall(g_projectiles[j].x, g_projectiles[j].y) || hitPlayer)
                         g_projectiles[j].active = false;
                     else
                         activeProjectiles++;
@@ -213,6 +241,7 @@ void serverGameLoop() {
                     ps.x = g_players[i].x;
                     ps.y = g_players[i].y;
                     ps.aimAngle = g_players[i].aimAngle;
+                    ps.hp = htonl((uint32_t)g_players[i].hp);
 
                     pktData.insert(pktData.end(), reinterpret_cast<char*>(&ps), reinterpret_cast<char*>(&ps) + sizeof(ps));
                 }

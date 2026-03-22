@@ -50,6 +50,7 @@ uint32_t g_lastSeq = 0;
 struct ClientPlayer {
     float x, y;
     float aimAngle;
+    int hp;
 }; 
 std::map<uint32_t, ClientPlayer> g_renderPlayers;
 std::vector<ProjectileState> g_renderProjectiles;
@@ -106,6 +107,8 @@ void udpReceiverThread() {
                         activePlayersThisTick[pID].x = ps->x;
                         activePlayersThisTick[pID].y = ps->y;
                         activePlayersThisTick[pID].aimAngle = ps->aimAngle;
+                        activePlayersThisTick[pID].hp = (int)ntohl(ps->hp);
+
                         payloadPtr += sizeof(PlayerState);
                     }
                     g_renderPlayers = activePlayersThisTick;
@@ -152,14 +155,45 @@ void drawMap() {
     glEnd();
 }
 
-void drawTank(float x, float y, float r, float g, float b, float facingAngle, bool isLocalPlayer) {
+void drawTank(float x, float y, float r, float g, float b, float facingAngle, int hp, bool isLocalPlayer) {
     float width = tank_width;
     float height = tank_height;
     float gunLength = tank_gunLength;
     float outline_thickness = tank_outline_thickness;
+    float hp_thickness = tank_hp_thickness;
 
     glPushMatrix();
     glTranslatef(x, y, 0.0f); 
+
+    // draw hp bar
+    glPushMatrix();
+    glTranslatef(0.0f, height + 0.04f, 0.0f); // hp bar above tank body
+
+    float hpBarWidth = width * 0.9f;
+    float hpBarHeight = hp_thickness;
+
+    // Draw Dark Background
+    glBegin(GL_QUADS);
+    glColor3f(0.2f, 0.2f, 0.2f);
+    glVertex2f(-hpBarWidth, -hpBarHeight);
+    glVertex2f(hpBarWidth, -hpBarHeight);
+    glVertex2f(hpBarWidth, hpBarHeight);
+    glVertex2f(-hpBarWidth, hpBarHeight);
+    glEnd();
+
+    // Draw Red HP Bar
+    float hpPct = fmax(0.0f, (float)hp / (float)MAX_HP);
+    float currentWidth = -hpBarWidth + (2.0f * hpBarWidth * hpPct);
+
+    glBegin(GL_QUADS);
+    glColor3f(0.9f, 0.1f, 0.1f);
+    glVertex2f(-hpBarWidth, -hpBarHeight);
+    glVertex2f(currentWidth, -hpBarHeight);
+    glVertex2f(currentWidth, hpBarHeight);
+    glVertex2f(-hpBarWidth, hpBarHeight);
+    glEnd();
+    glPopMatrix();
+
     
     glRotatef(facingAngle, 0.0f, 0.0f, 1.0f);
 
@@ -318,6 +352,7 @@ int main() {
             float px = pair.second.x;
             float py = pair.second.y;
             float pAngle = pair.second.aimAngle;
+            int pHP = pair.second.hp;
 
             float r = 0.2f, g = 0.2f, b = 0.2f;
             if (id % 4 == 0) { r = 0.8f; }                     // Player 0: Red
@@ -326,7 +361,7 @@ int main() {
             else if (id % 4 == 3) { r = 0.8f; g = 0.8f; }      // Player 3: Yellow
 
             bool isMe = (id == myPlayerID);
-            drawTank(px, py, r, g, b, pAngle, isMe);
+            drawTank(px, py, r, g, b, pAngle, pHP, isMe);
         }
 
         for (const auto& proj : projsToDraw) {
