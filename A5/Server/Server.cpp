@@ -45,10 +45,12 @@ struct Player {
     float x = 10.0f, y = 10.0f;
     float aimAngle = 0.0f;
     int shootCooldown = 0;
-    int hp = 100;
+    int hp = MAX_HP;
     bool connected = false;
     bool up = false, down = false, left = false, right = false;
     bool space = false;
+    bool justShot = false;
+    bool justHit = false;
 };
 
 struct Projectile {
@@ -127,6 +129,13 @@ void serverGameLoop() {
         int activeProjectiles = 0;
         {
             std::lock_guard<std::mutex> lk(g_stateMtx);
+
+            // reset audio flags at start of evrey tick
+            for (int i = 0; i < MAX_PLAYERS; i++) {
+                g_players[i].justShot = false;
+                g_players[i].justHit = false;
+            }
+
             for (int i = 0; i < MAX_PLAYERS; i++) {
                 if (g_players[i].connected) {
                     activePlayers++;
@@ -161,7 +170,7 @@ void serverGameLoop() {
                         for (int j = 0; j < MAX_PROJECTILES; j++) {
                             if (!g_projectiles[j].active) {
                                 g_projectiles[j].active = true;
-                                g_projectiles[j].lifeTimer = 120; // 60 * 2 ticks
+                                g_projectiles[j].lifeTimer = PROJECTILE_TTL; // 60 * 2 ticks
                                 g_projectiles[j].ownerID = i;
 
                                 float gunOffset = tank_width + tank_gunLength;
@@ -171,7 +180,8 @@ void serverGameLoop() {
                                 g_projectiles[j].vx = cos(rad) * g_bulletSpeed;
                                 g_projectiles[j].vy = sin(rad) * g_bulletSpeed;
 
-                                g_players[i].shootCooldown = 15; // 15 ticks
+                                g_players[i].shootCooldown = tank_shootCooldown; // ticks
+                                g_players[i].justShot = true;
                                 break;
                             }
                         }
@@ -199,6 +209,7 @@ void serverGameLoop() {
 
                             if ((dx * dx + dy * dy) < (0.06f * 0.06f)) {
                                 g_players[p].hp -= BULLET_DAMAGE;
+                                g_players[p].justHit = true;
 
                                 // respawn
                                 if (g_players[p].hp <= 0) {
@@ -242,6 +253,9 @@ void serverGameLoop() {
                     ps.y = g_players[i].y;
                     ps.aimAngle = g_players[i].aimAngle;
                     ps.hp = htonl((uint32_t)g_players[i].hp);
+                    ps.justShot = g_players[i].justShot;
+                    ps.justHit = g_players[i].justHit;
+                    ps.shootCooldown = htonl((uint32_t)g_players[i].shootCooldown);
 
                     pktData.insert(pktData.end(), reinterpret_cast<char*>(&ps), reinterpret_cast<char*>(&ps) + sizeof(ps));
                 }
@@ -360,6 +374,8 @@ int main() {
                                 g_players[assignedID].y = 0.0f;
                                 g_players[assignedID].aimAngle = 0.0f;
                             }
+
+                            g_players[assignedID].hp = MAX_HP;
 
                             g_players[assignedID].up = false;
                             g_players[assignedID].down = false;

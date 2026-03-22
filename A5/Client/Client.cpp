@@ -40,6 +40,9 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 
 #include "../NetworkData.h"
 
+#define MINIAUDIO_IMPLEMENTATION
+#include "../Audiomanager.h"
+
 #define REQ_JOIN (unsigned char)0x06
 
 std::atomic<bool> g_running{ true };
@@ -51,9 +54,20 @@ struct ClientPlayer {
     float x, y;
     float aimAngle;
     int hp;
+    int shootCooldown;
 }; 
 std::map<uint32_t, ClientPlayer> g_renderPlayers;
 std::vector<ProjectileState> g_renderProjectiles;
+
+AudioManager* g_audio = nullptr;
+constexpr const char* ingame_BGM_audio = "bgm.wav";
+constexpr const char* shooting_audio = "shoot.mp3";
+constexpr const char* explosion_audio = "explode.mp3";
+constexpr const char* mainmenu_BGM_audio = "mm_bgm.wav";
+
+bool g_isPaused = false;
+bool g_escWasPressed = false;
+float g_currentVolume = 0.5f; // 0.0 to 1.0
 
 static bool sendAll(SOCKET s, const void* data, int len) {
     const char* ptr = reinterpret_cast<const char*>(data);
@@ -108,6 +122,12 @@ void udpReceiverThread() {
                         activePlayersThisTick[pID].y = ps->y;
                         activePlayersThisTick[pID].aimAngle = ps->aimAngle;
                         activePlayersThisTick[pID].hp = (int)ntohl(ps->hp);
+                        activePlayersThisTick[pID].shootCooldown = (int)ntohl(ps->shootCooldown);
+
+                        if (g_audio) {
+                            if (ps->justShot) g_audio->PlaySFX(shooting_audio);
+                            if (ps->justHit) g_audio->PlaySFX(explosion_audio);
+                        }
 
                         payloadPtr += sizeof(PlayerState);
                     }
@@ -155,7 +175,8 @@ void drawMap() {
     glEnd();
 }
 
-void drawTank(float x, float y, float r, float g, float b, float facingAngle, int hp, bool isLocalPlayer) {
+// draws tank, hp bar, shot cooldown bar
+void drawTank(float x, float y, float r, float g, float b, float facingAngle, int hp, int cooldown, bool isLocalPlayer) {
     float width = tank_width;
     float height = tank_height;
     float gunLength = tank_gunLength;
@@ -165,33 +186,66 @@ void drawTank(float x, float y, float r, float g, float b, float facingAngle, in
     glPushMatrix();
     glTranslatef(x, y, 0.0f); 
 
-    // draw hp bar
+    // Draw HP n Cooldown bar
     glPushMatrix();
     glTranslatef(0.0f, height + 0.04f, 0.0f); // hp bar above tank body
 
-    float hpBarWidth = width * 0.9f;
-    float hpBarHeight = hp_thickness;
+    float BarWidth = width * 0.9f;
+    float BarHeight = hp_thickness;
 
     // Draw Dark Background
     glBegin(GL_QUADS);
     glColor3f(0.2f, 0.2f, 0.2f);
-    glVertex2f(-hpBarWidth, -hpBarHeight);
-    glVertex2f(hpBarWidth, -hpBarHeight);
-    glVertex2f(hpBarWidth, hpBarHeight);
-    glVertex2f(-hpBarWidth, hpBarHeight);
+    glVertex2f(-BarWidth, -BarHeight);
+    glVertex2f(BarWidth, -BarHeight);
+    glVertex2f(BarWidth, BarHeight);
+    glVertex2f(-BarWidth, BarHeight);
     glEnd();
 
     // Draw Red HP Bar
     float hpPct = fmax(0.0f, (float)hp / (float)MAX_HP);
-    float currentWidth = -hpBarWidth + (2.0f * hpBarWidth * hpPct);
+    float currentWidth = -BarWidth + (2.0f * BarWidth * hpPct);
 
     glBegin(GL_QUADS);
     glColor3f(0.9f, 0.1f, 0.1f);
-    glVertex2f(-hpBarWidth, -hpBarHeight);
-    glVertex2f(currentWidth, -hpBarHeight);
-    glVertex2f(currentWidth, hpBarHeight);
-    glVertex2f(-hpBarWidth, hpBarHeight);
+    glVertex2f(-BarWidth, -BarHeight);
+    glVertex2f(currentWidth, -BarHeight);
+    glVertex2f(currentWidth, BarHeight);
+    glVertex2f(-BarWidth, BarHeight);
     glEnd();
+
+    // Draw Shoot Cooldown bar
+    float maxCD = (float)tank_shootCooldown;
+    float cooldownPct = (maxCD - (float)cooldown) / maxCD;
+
+    if (cooldownPct < 0.0f) cooldownPct = 0.0f;
+    if (cooldownPct > 1.0f) cooldownPct = 1.0f;
+
+    float cdFill = -BarWidth + (2.0f * BarWidth * cooldownPct);
+    float cdY = -0.01f; // Positioned below HP bar
+    float cdHeight = hp_thickness;
+
+    // Background
+    glColor3f(0.1f, 0.1f, 0.1f); // Dark gray
+    glBegin(GL_QUADS);
+    glVertex2f(-BarWidth, cdY);
+    glVertex2f(BarWidth, cdY);
+    glVertex2f(BarWidth, cdY + cdHeight);
+    glVertex2f(-BarWidth, cdY + cdHeight);
+    glEnd();
+
+    if (cooldown > 0)
+        glColor3f(0.3f, 0.8f, 1.0f); // Loading Cyan
+    else
+        glColor3f(0.2f, 0.8f, 0.2f); // Ready Green
+
+    glBegin(GL_QUADS);
+    glVertex2f(-BarWidth, cdY);
+    glVertex2f(cdFill, cdY);
+    glVertex2f(cdFill, cdY + cdHeight);
+    glVertex2f(-BarWidth, cdY + cdHeight);
+    glEnd();
+
     glPopMatrix();
 
     
@@ -244,6 +298,86 @@ void drawProjectile(float x, float y) {
     }
     glEnd();
     glPopMatrix();
+}
+
+void drawPauseMenu() {
+    // Dark Overlay
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glColor4f(0.0f, 0.0f, 0.0f, 0.7f);
+    glBegin(GL_QUADS);
+    glVertex2f(-1.0f, -1.0f); glVertex2f(1.0f, -1.0f);
+    glVertex2f(1.0f, 1.0f); glVertex2f(-1.0f, 1.0f);
+    glEnd();
+    glDisable(GL_BLEND);
+
+    // Pause Icon
+    glColor3f(1.0f, 1.0f, 1.0f);
+    glBegin(GL_QUADS);
+    glVertex2f(-0.08f, 0.2f); glVertex2f(-0.03f, 0.2f); glVertex2f(-0.03f, 0.4f); glVertex2f(-0.08f, 0.4f);
+    glVertex2f(0.03f, 0.2f); glVertex2f(0.08f, 0.2f); glVertex2f(0.08f, 0.4f); glVertex2f(0.03f, 0.4f);
+    glEnd();
+
+    // Volume Bar Background
+    float barY = -0.1f;
+    float barHalfWidth = 0.4f;
+    glColor3f(0.3f, 0.3f, 0.3f);
+    glBegin(GL_QUADS);
+    glVertex2f(-barHalfWidth, barY - 0.02f); glVertex2f(barHalfWidth, barY - 0.02f);
+    glVertex2f(barHalfWidth, barY + 0.02f); glVertex2f(-barHalfWidth, barY + 0.02f);
+    glEnd();
+
+    // Volume Bar Fill
+    float fillRight = -barHalfWidth + (g_currentVolume * (barHalfWidth * 2.0f));
+    glColor3f(0.2f, 0.8f, 0.2f);
+    glBegin(GL_QUADS);
+    glVertex2f(-barHalfWidth, barY - 0.02f); glVertex2f(fillRight, barY - 0.02f);
+    glVertex2f(fillRight, barY + 0.02f); glVertex2f(-barHalfWidth, barY + 0.02f);
+    glEnd();
+
+    // Circular Buttons with a small gap
+    float buttonRadius = 0.05f;
+    float gap = 0.08f;
+
+    // Minus Button (Left)
+    glColor3f(0.8f, 0.2f, 0.2f);
+    float minusCenterX = -barHalfWidth - gap;
+    glBegin(GL_POLYGON);
+    for (int i = 0; i < 360; i += 20) {
+        float theta = i * 3.14159f / 180.0f;
+        glVertex2f(minusCenterX + buttonRadius * cos(theta), barY + buttonRadius * sin(theta));
+    }
+    glEnd();
+
+    // Plus Button (Right)
+    glColor3f(0.2f, 0.8f, 0.2f);
+    float plusCenterX = barHalfWidth + gap;
+    glBegin(GL_POLYGON);
+    for (int i = 0; i < 360; i += 20) {
+        float theta = i * 3.14159f / 180.0f;
+        glVertex2f(plusCenterX + buttonRadius * cos(theta), barY + buttonRadius * sin(theta));
+    }
+    glEnd();
+
+    // Quit Button (A red square with a white X)
+    float quitY = -0.4f; // Positioned below the volume bar
+    float quitSize = 0.06f;
+
+    // Red Background
+    glColor3f(0.8f, 0.2f, 0.2f);
+    glBegin(GL_QUADS);
+    glVertex2f(-quitSize, quitY - quitSize); glVertex2f(quitSize, quitY - quitSize);
+    glVertex2f(quitSize, quitY + quitSize); glVertex2f(-quitSize, quitY + quitSize);
+    glEnd();
+
+    // White X
+    glColor3f(1.0f, 1.0f, 1.0f);
+    glLineWidth(2.0f);
+    glBegin(GL_LINES);
+    glVertex2f(-0.03f, quitY - 0.03f); glVertex2f(0.03f, quitY + 0.03f);
+    glVertex2f(0.03f, quitY - 0.03f); glVertex2f(-0.03f, quitY + 0.03f);
+    glEnd();
+    glLineWidth(1.0f);
 }
 
 int main() {
@@ -304,6 +438,9 @@ int main() {
     inet_pton(AF_INET, serverIPStr.c_str(), &serverUdpAddr.sin_addr);
     serverUdpAddr.sin_port = htons(serverUDPPort);
 
+    g_audio = new AudioManager();
+    g_audio->PlayBGM(ingame_BGM_audio);
+
     std::thread tUDP(udpReceiverThread);
 
     if (!glfwInit()) return -1;
@@ -320,20 +457,88 @@ int main() {
     {
         bool isFocused = glfwGetWindowAttrib(window, GLFW_FOCUSED) != 0;
 
+        // pause
+        bool escPressed = isFocused && (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS);
+        if (escPressed && !g_escWasPressed)
+            g_isPaused = !g_isPaused;
+        g_escWasPressed = escPressed;
+
+        if (g_isPaused && isFocused) {
+            if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS) {
+                g_currentVolume += 0.01f;
+                if (g_currentVolume > 1.0f) g_currentVolume = 1.0f;
+                if (g_audio) g_audio->SetMasterVolume(g_currentVolume);
+            }
+            if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS) {
+                g_currentVolume -= 0.01f;
+                if (g_currentVolume < 0.0f) g_currentVolume = 0.0f;
+                if (g_audio) g_audio->SetMasterVolume(g_currentVolume);
+            }
+        }
+
+        // hide cursor in game show in pause menu
+        if (g_isPaused) 
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        else
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+
+        // check for mouse click in pause menu
+        static bool mouseWasPressed = false;
+        bool mousePressed = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+
+        if (g_isPaused && mousePressed) {
+            double xpos, ypos;
+            glfwGetCursorPos(window, &xpos, &ypos);
+
+            int width, height;
+            glfwGetWindowSize(window, &width, &height);
+            float mouseX = (float)((xpos / width) * 2.0 - 1.0);
+            float mouseY = (float)(1.0 - (ypos / height) * 2.0);
+
+            float barY = -0.1f;
+            double buttonRadius_sq = 0.05f * 0.05f;
+            float gap = 0.08f;
+            float barHalfWidth = 0.4f;
+
+            // check for vol control
+            float volumeChange = 0.001f;
+            double distMinus_sq = pow(mouseX - (-barHalfWidth - gap), 2) + pow(mouseY - barY, 2);
+            if (distMinus_sq <= buttonRadius_sq) {
+                g_currentVolume = fmaxf(0.0f, g_currentVolume - volumeChange);
+                if (g_audio) g_audio->SetMasterVolume(g_currentVolume);
+            }
+            double distPlus_sq = pow(mouseX - (barHalfWidth + gap), 2) + pow(mouseY - barY, 2);
+            if (distPlus_sq <= buttonRadius_sq) {
+                g_currentVolume = fminf(1.0f, g_currentVolume + volumeChange);
+                if (g_audio) g_audio->SetMasterVolume(g_currentVolume);
+            }
+
+            // check for quit button
+            if (!mouseWasPressed) {
+                float quitY = -0.4f;
+                float quitSize = 0.06f;
+                if (mouseX >= -quitSize && mouseX <= quitSize && mouseY >= quitY - quitSize && mouseY <= quitY + quitSize)
+                    g_running = false;
+            }
+        }
+        mouseWasPressed = mousePressed;
+
+        // send input data pkt
         InputPacket inputPkt;
         inputPkt.sequenceNum = htonl(inputSeq++);
         inputPkt.playerID = htonl(myPlayerID);
         
-        inputPkt.w_pressed = isFocused && (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS);
-        inputPkt.a_pressed = isFocused && (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS);
-        inputPkt.s_pressed = isFocused && (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS);
-        inputPkt.d_pressed = isFocused && (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS);
-        inputPkt.space_pressed = isFocused && (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS); // NEW!
+        inputPkt.w_pressed = !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS);
+        inputPkt.a_pressed = !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS);
+        inputPkt.s_pressed = !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS);
+        inputPkt.d_pressed = !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS);
+        inputPkt.space_pressed = isFocused && (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
         inputPkt.aimAngle = 0.0f;
 
         sendto(g_udpSocket, reinterpret_cast<const char*>(&inputPkt), sizeof(inputPkt), 0,
             (sockaddr*)&serverUdpAddr, sizeof(serverUdpAddr));
 
+        // render
         glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
@@ -353,6 +558,7 @@ int main() {
             float py = pair.second.y;
             float pAngle = pair.second.aimAngle;
             int pHP = pair.second.hp;
+            int pShootCD = pair.second.shootCooldown;
 
             float r = 0.2f, g = 0.2f, b = 0.2f;
             if (id % 4 == 0) { r = 0.8f; }                     // Player 0: Red
@@ -361,11 +567,15 @@ int main() {
             else if (id % 4 == 3) { r = 0.8f; g = 0.8f; }      // Player 3: Yellow
 
             bool isMe = (id == myPlayerID);
-            drawTank(px, py, r, g, b, pAngle, pHP, isMe);
+            drawTank(px, py, r, g, b, pAngle, pHP, pShootCD, isMe);
         }
 
         for (const auto& proj : projsToDraw) {
             drawProjectile(proj.x, proj.y);
+        }
+
+        if (g_isPaused) {
+            drawPauseMenu();
         }
 
         glfwSwapBuffers(window);
@@ -379,5 +589,6 @@ int main() {
     tUDP.join();
     glfwTerminate();
     WSACleanup();
+    delete g_audio;
     return 0;
 }

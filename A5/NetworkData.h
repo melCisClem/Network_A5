@@ -28,6 +28,9 @@ struct PlayerState {
     float y;
     float aimAngle;
     int32_t hp;
+    bool justShot;
+    bool justHit;
+    int32_t shootCooldown;
 };
 
 struct ProjectileState {
@@ -59,12 +62,14 @@ constexpr int UDPPACKET_BUFFER_SIZE = 4096;
 
 constexpr int MAX_HP = 100;
 constexpr int BULLET_DAMAGE = 20;
+constexpr int PROJECTILE_TTL = 120; // ticks
 
 constexpr float tank_width = 0.04f;
 constexpr float tank_height = 0.03f;
 constexpr float tank_gunLength = 0.05f;
 constexpr float tank_outline_thickness = 2.0f;
 constexpr float tank_hp_thickness = 0.003f;
+constexpr int tank_shootCooldown = 120; // ticks
 
 constexpr int MAP_WIDTH = 10;
 constexpr int MAP_HEIGHT = 10;

@@ -57,7 +57,8 @@
     </Link>
     <PostBuildEvent>
       <Command>if not exist "$(SolutionDir)..\build" mkdir "$(SolutionDir)..\build"
-copy /Y "$(TargetPath)" "$(SolutionDir)..\build"</Command>
+copy /Y "$(TargetPath)" "$(SolutionDir)..\build"
+xcopy /E /Y /I "$(ProjectDir)..\Audio" "$(ProjectDir)..\..\build\Audio"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -76,7 +77,8 @@ copy /Y "$(TargetPath)" "$(SolutionDir)..\build"</Command>
     </Link>
     <PostBuildEvent>
       <Command>if not exist "$(SolutionDir)..\build" mkdir "$(SolutionDir)..\build"
-copy /Y "$(TargetPath)" "$(SolutionDir)..\build"</Command>
+copy /Y "$(TargetPath)" "$(SolutionDir)..\build"
+xcopy /E /Y /I "$(ProjectDir)..\Audio" "$(ProjectDir)..\..\build\Audio"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
