@@ -384,7 +384,13 @@ int main() {
     WSADATA wsaData;
     WSAStartup(MAKEWORD(2, 2), &wsaData);
 
-    std::string serverIPStr = "127.0.0.1";
+    std::string serverIPStr;
+    std::cout << "Enter Server IPv4 (e.g., 192.168.0.6): ";
+    std::getline(std::cin, serverIPStr);
+
+    if (serverIPStr.empty())
+        serverIPStr = "192.168.0.6";
+
     std::string tcpPortStr = "27015";
     uint16_t serverUDPPort = 27016;
 
@@ -394,12 +400,14 @@ int main() {
     tcpHints.ai_socktype = SOCK_STREAM;
     getaddrinfo(serverIPStr.c_str(), tcpPortStr.c_str(), &tcpHints, &tcpInfo);
 
+    std::cout << "[Client] Attempting to connect to " << serverIPStr << "..." << std::endl;
     SOCKET g_tcpSocket = socket(tcpHints.ai_family, tcpHints.ai_socktype, tcpHints.ai_protocol);
     if (connect(g_tcpSocket, tcpInfo->ai_addr, (int)tcpInfo->ai_addrlen) == SOCKET_ERROR) {
         std::cerr << "Failed to connect to server TCP.\n";
         return 1;
     }
     freeaddrinfo(tcpInfo);
+    std::cout << "[Client] Successfully connected to server " << serverIPStr << std::endl;
 
     // UDP Bind (Port 0 lets the OS pick an available port automatically)
     g_udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -418,8 +426,9 @@ int main() {
     // Send REQ_JOIN with our IP and Port
     std::vector<char> msg;
     msg.push_back(REQ_JOIN);
-    in_addr myIp; inet_pton(AF_INET, "127.0.0.1", &myIp);
-    msg.insert(msg.end(), reinterpret_cast<char*>(&myIp.s_addr), reinterpret_cast<char*>(&myIp.s_addr) + 4);
+
+    uint32_t zeroIp = 0;
+    msg.insert(msg.end(), reinterpret_cast<char*>(&zeroIp), reinterpret_cast<char*>(&zeroIp) + 4);
     msg.insert(msg.end(), reinterpret_cast<char*>(&myUDPPort), reinterpret_cast<char*>(&myUDPPort) + 2);
     sendAll(g_tcpSocket, msg.data(), (int)msg.size());
 

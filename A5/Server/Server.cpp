@@ -291,8 +291,32 @@ int main() {
     WSADATA wsaData;
     WSAStartup(MAKEWORD(2, 2), &wsaData);
 
+    char hostname[256];
+    if (gethostname(hostname, sizeof(hostname)) == 0) {
+        addrinfo hints{}, * res = nullptr;
+        hints.ai_family = AF_INET; // IPv4 only
+        hints.ai_socktype = SOCK_STREAM;
+
+        if (getaddrinfo(hostname, nullptr, &hints, &res) == 0) {
+            std::cout << "Local Hostname: " << hostname << std::endl;
+
+            for (addrinfo* p = res; p != nullptr; p = p->ai_next) {
+                sockaddr_in* addr = reinterpret_cast<sockaddr_in*>(p->ai_addr);
+                char ipStr[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &addr->sin_addr, ipStr, sizeof(ipStr));
+
+                // Ignore the loopback address 127.0.0.1
+                if (std::string(ipStr) != "127.0.0.1")
+                    std::cout << "Server IP Address: " << ipStr << std::endl;
+            }
+            freeaddrinfo(res);
+        }
+    }
+
     std::string tcpPortStr = "27015";
     std::string udpPortStr = "27016";
+    std::cout << "Listening on TCP Port: " << tcpPortStr << std::endl;
+    std::cout << "Listening on UDP Port: " << udpPortStr << std::endl;
 
     addrinfo tcpHints{}, * tcpInfo = nullptr;
     tcpHints.ai_family = AF_INET;
@@ -345,9 +369,13 @@ int main() {
 
                         if (assignedID != -1) {
                             g_players[assignedID].udpAddr.sin_family = AF_INET;
-                            g_players[assignedID].udpAddr.sin_addr.s_addr = clientIP_net;
+                            g_players[assignedID].udpAddr.sin_addr = clientAddr.sin_addr;
                             g_players[assignedID].udpAddr.sin_port = clientPort_net;
                             g_players[assignedID].connected = true;
+
+                            char ipStr[INET_ADDRSTRLEN];
+                            inet_ntop(AF_INET, &clientIP_net, ipStr, INET_ADDRSTRLEN);
+                            std::cout << "[Server] Player " << assignedID << " joined from " << ipStr << ":" << ntohs(clientPort_net) << std::endl;
 
                             int spawnMarker = assignedID + 2;
                             bool foundSpawn = false;
