@@ -40,18 +40,30 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 std::atomic<bool> g_running{ true };
 SOCKET g_serverUDPSocket = INVALID_SOCKET;
 
-// Player Data Structure
 struct Player {
     sockaddr_in udpAddr{};
     bool connected = false;
-    // FIX 2: Default to 10.0f so they spawn off-screen when not connected!
     float x = 10.0f, y = 10.0f;
     bool up = false, down = false, left = false, right = false;
+    bool space = false;
+    int shootCooldown = 0;
+    float aimAngle = 0.0f;
+};
+
+struct Projectile {
+    bool active = false;
+    float x = 0.0f, y = 0.0f;
+    float vx = 0.0f, vy = 0.0f;
+    int lifeTimer = 0;
 };
 
 std::mutex g_stateMtx;
-Player g_players[2]; // Slot 0 and Slot 1
-float g_moveSpeed = 0.02f;
+Player g_players[MAX_PLAYERS];
+Projectile g_projectiles[MAX_PROJECTILES];
+
+float g_moveSpeed = 0.015f;
+float g_turnSpeed = 3.0f;
+float g_bulletSpeed = 0.05f;
 
 static bool recvAll(SOCKET s, void* buf, int len) {
     char* ptr = reinterpret_cast<char*>(buf);
@@ -89,13 +101,14 @@ void udpReceiverThread() {
             auto* pkt = reinterpret_cast<InputPacket*>(buf.data());
 
             uint32_t id = ntohl(pkt->playerID);
-            if (id < 2) {
+            if (id < MAX_PLAYERS) {
                 std::lock_guard<std::mutex> lk(g_stateMtx);
                 if (g_players[id].connected) {
                     g_players[id].up = pkt->w_pressed;
                     g_players[id].down = pkt->s_pressed;
                     g_players[id].left = pkt->a_pressed;
                     g_players[id].right = pkt->d_pressed;
+                    g_players[id].space = pkt->space_pressed;
                 }
             }
         }
@@ -105,34 +118,123 @@ void udpReceiverThread() {
 // 60 Tick Game Loop
 void serverGameLoop() {
     uint32_t sequence = 0;
-    std::cout << "[Server] Game loop started.\n";
+    std::cout << "[Server] Game loop started... tickrate 60\n";
 
     while (g_running) {
-        GameStatePacket pkt;
-        pkt.sequenceNum = htonl(sequence++);
-
-        // 1. Update positions and build packet
+        int activePlayers = 0;
+        int activeProjectiles = 0;
         {
             std::lock_guard<std::mutex> lk(g_stateMtx);
-            for (int i = 0; i < 2; i++) {
+            for (int i = 0; i < MAX_PLAYERS; i++) {
                 if (g_players[i].connected) {
-                    if (g_players[i].up)    g_players[i].y += g_moveSpeed;
-                    if (g_players[i].down)  g_players[i].y -= g_moveSpeed;
-                    if (g_players[i].left)  g_players[i].x -= g_moveSpeed;
-                    if (g_players[i].right) g_players[i].x += g_moveSpeed;
+                    activePlayers++;
+
+                    // A n D
+                    if (g_players[i].left)  g_players[i].aimAngle += g_turnSpeed; // CCW
+                    if (g_players[i].right) g_players[i].aimAngle -= g_turnSpeed; // CW
+
+                    float rad = g_players[i].aimAngle * 3.14159f / 180.0f;
+
+                    // W n S
+                    if (g_players[i].up) {
+                        float newX = g_players[i].x + cos(rad) * g_moveSpeed;
+                        float newY = g_players[i].y + sin(rad) * g_moveSpeed;
+
+                        if (!isWall(newX, newY)) {
+                            g_players[i].x = newX;
+                            g_players[i].y = newY;
+                        }
+                    }
+                    if (g_players[i].down) {
+                        float newX = g_players[i].x - cos(rad) * g_moveSpeed;
+                        float newY = g_players[i].y - sin(rad) * g_moveSpeed;
+
+                        if (!isWall(newX, newY)) {
+                            g_players[i].x = newX;
+                            g_players[i].y = newY;
+                        }
+                    }
+
+                    if (g_players[i].space && g_players[i].shootCooldown <= 0) {
+                        for (int j = 0; j < MAX_PROJECTILES; j++) {
+                            if (!g_projectiles[j].active) {
+                                g_projectiles[j].active = true;
+                                g_projectiles[j].lifeTimer = 120; // 60 * 2 ticks
+
+                                float gunOffset = tank_width + tank_gunLength;
+                                g_projectiles[j].x = g_players[i].x + cos(rad) * gunOffset;
+                                g_projectiles[j].y = g_players[i].y + sin(rad) * gunOffset;
+
+                                g_projectiles[j].vx = cos(rad) * g_bulletSpeed;
+                                g_projectiles[j].vy = sin(rad) * g_bulletSpeed;
+
+                                g_players[i].shootCooldown = 15; // 15 ticks
+                                break;
+                            }
+                        }
+                    }
+                    if (g_players[i].shootCooldown > 0) g_players[i].shootCooldown--;
                 }
             }
 
-            pkt.p0X = g_players[0].x; pkt.p0Y = g_players[0].y;
-            pkt.p1X = g_players[1].x; pkt.p1Y = g_players[1].y;
+            // update projectiles
+            for (int j = 0; j < MAX_PROJECTILES; j++) {
+                if (g_projectiles[j].active) {
+                    g_projectiles[j].x += g_projectiles[j].vx;
+                    g_projectiles[j].y += g_projectiles[j].vy;
+                    g_projectiles[j].lifeTimer--;
+
+                    // kill old proj
+                    if (g_projectiles[j].lifeTimer <= 0 || isWall(g_projectiles[j].x, g_projectiles[j].y))
+                        g_projectiles[j].active = false;
+                    else
+                        activeProjectiles++;
+                }
+            }
         }
 
-        // 2. Broadcast to all connected clients
+        // building the packet
+        GameStateHeader header;
+        header.sequenceNum = htonl(sequence++);
+        header.numPlayers = htonl(activePlayers);
+        header.numProjectiles = htonl(activeProjectiles);
+
+        std::vector<char> pktData;
+        pktData.insert(pktData.end(), reinterpret_cast<char*>(&header), reinterpret_cast<char*>(&header) + sizeof(header));
+
         {
             std::lock_guard<std::mutex> lk(g_stateMtx);
-            for (int i = 0; i < 2; i++) {
+
+            // pack players 1st
+            for (int i = 0; i < MAX_PLAYERS; i++) {
                 if (g_players[i].connected) {
-                    sendto(g_serverUDPSocket, reinterpret_cast<char*>(&pkt), sizeof(pkt), 0,
+                    PlayerState ps;
+                    ps.playerID = htonl(i);
+                    ps.x = g_players[i].x;
+                    ps.y = g_players[i].y;
+                    ps.aimAngle = g_players[i].aimAngle;
+
+                    pktData.insert(pktData.end(), reinterpret_cast<char*>(&ps), reinterpret_cast<char*>(&ps) + sizeof(ps));
+                }
+            }
+
+            // then pack proj
+            for (int j = 0; j < MAX_PROJECTILES; j++) {
+                if (g_projectiles[j].active) {
+                    ProjectileState proj;
+                    proj.x = g_projectiles[j].x;
+                    proj.y = g_projectiles[j].y;
+                    pktData.insert(pktData.end(), reinterpret_cast<char*>(&proj), reinterpret_cast<char*>(&proj) + sizeof(proj));
+                }
+            }
+        }
+
+        // broadcast
+        {
+            std::lock_guard<std::mutex> lk(g_stateMtx);
+            for (int i = 0; i < MAX_PLAYERS; i++) {
+                if (g_players[i].connected) {
+                    sendto(g_serverUDPSocket, pktData.data(), (int)pktData.size(), 0,
                         reinterpret_cast<sockaddr*>(&g_players[i].udpAddr), sizeof(g_players[i].udpAddr));
                 }
             }
@@ -190,8 +292,13 @@ int main() {
                     int assignedID = -1;
                     {
                         std::lock_guard<std::mutex> lk(g_stateMtx);
-                        if (!g_players[0].connected) assignedID = 0;
-                        else if (!g_players[1].connected) assignedID = 1;
+
+                        for (int i = 0; i < MAX_PLAYERS; i++) {
+                            if (!g_players[i].connected) {
+                                assignedID = i;
+                                break;
+                            }
+                        }
 
                         if (assignedID != -1) {
                             g_players[assignedID].udpAddr.sin_family = AF_INET;
@@ -199,10 +306,37 @@ int main() {
                             g_players[assignedID].udpAddr.sin_port = clientPort_net;
                             g_players[assignedID].connected = true;
 
-                            // Teleport them onto the screen
-                            g_players[assignedID].x = (assignedID == 0) ? -0.5f : 0.5f;
-                            g_players[assignedID].y = 0.0f;
-                            g_players[assignedID].up = g_players[assignedID].down = g_players[assignedID].left = g_players[assignedID].right = false;
+                            int spawnMarker = assignedID + 2;
+                            bool foundSpawn = false;
+
+                            for (int row = 0; row < MAP_HEIGHT; row++) {
+                                for (int col = 0; col < MAP_WIDTH; col++) {
+                                    if (ARENA_MAP[row][col] == spawnMarker) {
+
+                                        g_players[assignedID].x = ((col + 0.5f) * 2.0f / MAP_WIDTH) - 1.0f;
+                                        g_players[assignedID].y = ((row + 0.5f) * 2.0f / MAP_HEIGHT) - 1.0f;
+
+                                        g_players[assignedID].aimAngle = atan2(-g_players[assignedID].y, -g_players[assignedID].x) * 180.0f / 3.14159f;
+
+                                        foundSpawn = true;
+                                        break;
+                                    }
+                                }
+                                if (foundSpawn) break;
+                            }
+
+                            // if nvr set spawn ptn then auto spawn in center
+                            if (!foundSpawn) {
+                                g_players[assignedID].x = 0.0f;
+                                g_players[assignedID].y = 0.0f;
+                                g_players[assignedID].aimAngle = 0.0f;
+                            }
+
+                            g_players[assignedID].up = false;
+                            g_players[assignedID].down = false;
+                            g_players[assignedID].left = false;
+                            g_players[assignedID].right = false;
+                            g_players[assignedID].space = false;
                         }
                     }
 
@@ -212,8 +346,6 @@ int main() {
                     if (assignedID != -1) {
                         std::cout << "[Server] Player " << assignedID << " joined.\n";
 
-                        // FIX 1: Spin up a background thread to watch this player's TCP connection!
-                        // This frees up the main loop to accept Player 1 immediately.
                         std::thread clientTCPThread([clientSocket, assignedID]() {
                             char dummy;
                             while (recv(clientSocket, &dummy, 1, 0) > 0) {} // Block *only* this thread

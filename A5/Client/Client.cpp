@@ -36,6 +36,7 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 #include <atomic>
 #include <cmath>
 #include <string>
+#include <map>
 
 #include "../NetworkData.h"
 
@@ -44,11 +45,14 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 std::atomic<bool> g_running{ true };
 SOCKET g_udpSocket = INVALID_SOCKET;
 
-// Render State
 std::mutex g_stateMtx;
-float g_p0X = 0.0f, g_p0Y = 0.0f;
-float g_p1X = 0.0f, g_p1Y = 0.0f;
 uint32_t g_lastSeq = 0;
+struct ClientPlayer {
+    float x, y;
+    float aimAngle;
+}; 
+std::map<uint32_t, ClientPlayer> g_renderPlayers;
+std::vector<ProjectileState> g_renderProjectiles;
 
 static bool sendAll(SOCKET s, const void* data, int len) {
     const char* ptr = reinterpret_cast<const char*>(data);
@@ -73,34 +77,136 @@ static bool recvAll(SOCKET s, void* buf, int len) {
 }
 
 void udpReceiverThread() {
-    std::vector<char> buf(sizeof(GameStatePacket));
+    std::vector<char> buf(UDPPACKET_BUFFER_SIZE);
     sockaddr_in from{};
     int fromLen = sizeof(from);
 
     while (g_running) {
         int r = recvfrom(g_udpSocket, buf.data(), (int)buf.size(), 0, (sockaddr*)&from, &fromLen);
-        if (r == sizeof(GameStatePacket)) {
-            auto* pkt = reinterpret_cast<GameStatePacket*>(buf.data());
-            uint32_t seq = ntohl(pkt->sequenceNum);
 
-            std::lock_guard<std::mutex> lock(g_stateMtx);
-            if (seq > g_lastSeq) {
-                g_p0X = pkt->p0X; g_p0Y = pkt->p0Y;
-                g_p1X = pkt->p1X; g_p1Y = pkt->p1Y;
-                g_lastSeq = seq;
+        if (r >= sizeof(GameStateHeader)) {
+            auto* header = reinterpret_cast<GameStateHeader*>(buf.data());
+            uint32_t seq = ntohl(header->sequenceNum);
+            uint32_t numPlayers = ntohl(header->numPlayers);
+            uint32_t numProjs = ntohl(header->numProjectiles);
+
+            int expectedSize = sizeof(GameStateHeader) + (numPlayers * sizeof(PlayerState)) + (numProjs * sizeof(ProjectileState));
+            if (r >= expectedSize) {
+                std::lock_guard<std::mutex> lock(g_stateMtx);
+                if (seq > g_lastSeq) {
+                    g_lastSeq = seq;
+
+                    char* payloadPtr = buf.data() + sizeof(GameStateHeader);
+
+                    // players
+                    std::map<uint32_t, ClientPlayer> activePlayersThisTick;
+                    for (uint32_t i = 0; i < numPlayers; i++) {
+                        auto* ps = reinterpret_cast<PlayerState*>(payloadPtr);
+                        uint32_t pID = ntohl(ps->playerID);
+                        activePlayersThisTick[pID].x = ps->x;
+                        activePlayersThisTick[pID].y = ps->y;
+                        activePlayersThisTick[pID].aimAngle = ps->aimAngle;
+                        payloadPtr += sizeof(PlayerState);
+                    }
+                    g_renderPlayers = activePlayersThisTick;
+
+                    // projectiles
+                    uint32_t numProjs = ntohl(header->numProjectiles);
+                    g_renderProjectiles.clear(); // clean last frames projectiles
+                    for (uint32_t i = 0; i < numProjs; i++) {
+                        auto* proj = reinterpret_cast<ProjectileState*>(payloadPtr);
+                        g_renderProjectiles.push_back(*proj);
+                        payloadPtr += sizeof(ProjectileState);
+                    }
+                }
             }
         }
     }
 }
 
-void drawCircle(float x, float y, float radius, float r, float g, float b) {
+void drawMap() {
+    float cellW = 2.0f / MAP_WIDTH;
+    float cellH = 2.0f / MAP_HEIGHT;
+
+    glBegin(GL_QUADS);
+    glColor3f(0.3f, 0.3f, 0.3f); // Dark Gray Walls
+
+    for (int row = 0; row < MAP_HEIGHT; row++) {
+        for (int col = 0; col < MAP_WIDTH; col++) {
+            if (ARENA_MAP[row][col] == 1) {
+                // calc the bottom left corner of the grid cell
+                float x1 = -1.0f + (col * cellW);
+                float y1 = -1.0f + (row * cellH);
+
+                // calc the top-right corner
+                float x2 = x1 + cellW;
+                float y2 = y1 + cellH;
+
+                glVertex2f(x1, y1); // Bottom-left
+                glVertex2f(x2, y1); // Bottom-right
+                glVertex2f(x2, y2); // Top-right
+                glVertex2f(x1, y2); // Top-left
+            }
+        }
+    }
+    glEnd();
+}
+
+void drawTank(float x, float y, float r, float g, float b, float facingAngle, bool isLocalPlayer) {
+    float width = tank_width;
+    float height = tank_height;
+    float gunLength = tank_gunLength;
+    float outline_thickness = tank_outline_thickness;
+
+    glPushMatrix();
+    glTranslatef(x, y, 0.0f); 
+    
+    glRotatef(facingAngle, 0.0f, 0.0f, 1.0f);
+
+    // draw gun barrel
+    glLineWidth(4.0f);
+    glBegin(GL_LINES);
+    glColor3f(0.6f, 0.6f, 0.6f);
+    glVertex2f(0.0f, 0.0f);
+    glVertex2f(width + gunLength, 0.0f);
+    glEnd();
+    glLineWidth(1.0f);
+
+    // draw Body
+    glBegin(GL_QUADS);
+    glColor3f(r, g, b);
+    glVertex2f(-width, -height); // Bottom-left
+    glVertex2f(width, -height); // Bottom-right
+    glVertex2f(width, height); // Top-right
+    glVertex2f(-width, height); // Top-left
+    glEnd();
+
+    // draw outline only for local player
+    if (isLocalPlayer) {
+        glLineWidth(outline_thickness);
+        glBegin(GL_LINE_LOOP);
+        glColor3f(1.0f, 1.0f, 1.0f);
+
+        float offset = 0.001f;
+        glVertex2f(-width - offset, -height - offset);
+        glVertex2f(width + offset, -height - offset);
+        glVertex2f(width + offset, height + offset);
+        glVertex2f(-width - offset, height + offset);
+        glEnd();
+        glLineWidth(1.0f);
+    }
+
+    glPopMatrix();
+}
+
+void drawProjectile(float x, float y) {
     glPushMatrix();
     glTranslatef(x, y, 0.0f);
     glBegin(GL_POLYGON);
-    glColor3f(r, g, b);
-    for (int i = 0; i < 360; i += 10) {
+    glColor3f(1.0f, 1.0f, 0.0f); // yellow
+    for (int i = 0; i < 360; i += 30) {
         float theta = i * 3.14159f / 180.0f;
-        glVertex2f(radius * cos(theta), radius * sin(theta));
+        glVertex2f(0.02f * cos(theta), 0.02f * sin(theta));
     }
     glEnd();
     glPopMatrix();
@@ -176,20 +282,20 @@ int main() {
 
     uint32_t inputSeq = 0;
 
-    while (!glfwWindowShouldClose(window) && g_running) {
-
-        // --- WINDOW FOCUS CHECK ---
+    while (!glfwWindowShouldClose(window) && g_running) 
+    {
         bool isFocused = glfwGetWindowAttrib(window, GLFW_FOCUSED) != 0;
 
         InputPacket inputPkt;
         inputPkt.sequenceNum = htonl(inputSeq++);
-        inputPkt.playerID = htonl(myPlayerID); // Tell server who we are!
-
-        // Only read inputs if the window is currently selected by the user
+        inputPkt.playerID = htonl(myPlayerID);
+        
         inputPkt.w_pressed = isFocused && (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS);
         inputPkt.a_pressed = isFocused && (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS);
         inputPkt.s_pressed = isFocused && (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS);
         inputPkt.d_pressed = isFocused && (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS);
+        inputPkt.space_pressed = isFocused && (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS); // NEW!
+        inputPkt.aimAngle = 0.0f;
 
         sendto(g_udpSocket, reinterpret_cast<const char*>(&inputPkt), sizeof(inputPkt), 0,
             (sockaddr*)&serverUdpAddr, sizeof(serverUdpAddr));
@@ -197,16 +303,35 @@ int main() {
         glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
-        float p0x, p0y, p1x, p1y;
+        drawMap();
+
+        std::map<uint32_t, ClientPlayer> playersToDraw;
+        std::vector<ProjectileState> projsToDraw;
         {
             std::lock_guard<std::mutex> lock(g_stateMtx);
-            p0x = g_p0X; p0y = g_p0Y;
-            p1x = g_p1X; p1y = g_p1Y;
+            playersToDraw = g_renderPlayers;
+            projsToDraw = g_renderProjectiles;
         }
 
-        // Draw Player 0 (Green) and Player 1 (Blue)
-        drawCircle(p0x, p0y, 0.15f, 0.2f, 0.8f, 0.2f);
-        drawCircle(p1x, p1y, 0.15f, 0.2f, 0.4f, 0.9f);
+        for (const auto& pair : playersToDraw) {
+            uint32_t id = pair.first;
+            float px = pair.second.x;
+            float py = pair.second.y;
+            float pAngle = pair.second.aimAngle;
+
+            float r = 0.2f, g = 0.2f, b = 0.2f;
+            if (id % 4 == 0) { r = 0.8f; }                     // Player 0: Red
+            else if (id % 4 == 1) { g = 0.8f; }                // Player 1: Green
+            else if (id % 4 == 2) { b = 0.8f; }                // Player 2: Blue
+            else if (id % 4 == 3) { r = 0.8f; g = 0.8f; }      // Player 3: Yellow
+
+            bool isMe = (id == myPlayerID);
+            drawTank(px, py, r, g, b, pAngle, isMe);
+        }
+
+        for (const auto& proj : projsToDraw) {
+            drawProjectile(proj.x, proj.y);
+        }
 
         glfwSwapBuffers(window);
         glfwPollEvents();
