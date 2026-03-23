@@ -3,7 +3,13 @@
 #include <string>
 #include <fstream>
 #include <windows.h>
+
+// supress warning from miniaudio the external library i use for audio
+#pragma warning(push)
+#pragma warning(disable: 4244)
+#pragma warning(disable: 4267)
 #include "miniaudio.h"
+#pragma warning(pop)
 
 class AudioManager {
 private:
@@ -11,12 +17,14 @@ private:
     ma_sound currentBGM;
     bool isBgmLoaded;
 
-    bool FileExists(const std::string& path) {
+    bool FileExists(const std::string& path) 
+    {
         std::ifstream f(path.c_str());
         return f.good();
     }
 
-    std::string FindAudioFile(const std::string& filename) {
+    std::string FindAudioFile(const std::string& filename) 
+    {
         if (FileExists(filename)) // check current dir
             return filename;
 
@@ -34,8 +42,10 @@ private:
             exeDir + "\\..\\..\\Audio\\" + filename
         };
 
-        for (const std::string& path : pathsToTry) {
-            if (FileExists(path)) {
+        for (const std::string& path : pathsToTry) 
+        {
+            if (FileExists(path)) 
+            {
 #ifdef _DEBUG
                 std::cout << "[Audio] Found " << filename << " at: " << path << "\n";
 #endif
@@ -48,20 +58,24 @@ private:
     }
 
 public:
-    AudioManager() {
+    AudioManager() 
+    {
         isBgmLoaded = false;
         ma_result result = ma_engine_init(NULL, &engine);
         if (result != MA_SUCCESS)
             std::cerr << "Failed to initialize miniaudio engine!" << std::endl;
     }
 
-    ~AudioManager() {
+    ~AudioManager() 
+    {
         if (isBgmLoaded) ma_sound_uninit(&currentBGM);
         ma_engine_uninit(&engine);
     }
 
-    void PlayBGM(const std::string& filename) {
-        if (isBgmLoaded) {
+    void PlayBGM(const std::string& filename) 
+    {
+        if (isBgmLoaded)
+        {
             ma_sound_stop(&currentBGM);
             ma_sound_uninit(&currentBGM);
             isBgmLoaded = false;
@@ -69,7 +83,8 @@ public:
 
         std::string actualPath = FindAudioFile(filename);
         ma_result result = ma_sound_init_from_file(&engine, actualPath.c_str(), 0, NULL, NULL, &currentBGM);
-        if (result == MA_SUCCESS) {
+        if (result == MA_SUCCESS) 
+        {
             ma_sound_set_looping(&currentBGM, MA_TRUE);
             ma_sound_start(&currentBGM);
             ma_sound_set_volume(&currentBGM, 0.5f);
@@ -77,16 +92,17 @@ public:
         }
     }
 
-    void PlaySFX(const std::string& filename) {
+    void PlaySFX(const std::string& filename)
+    {
         std::string actualPath = FindAudioFile(filename);
         ma_result result = ma_engine_play_sound(&engine, actualPath.c_str(), NULL);
 
-        if (result != MA_SUCCESS) {
+        if (result != MA_SUCCESS)
             std::cerr << "[Audio] ERROR: Miniaudio failed to play " << filename << " (Error Code: " << result << ")\n";
-        }
     }
 
-    void SetMasterVolume(float volume) {
+    void SetMasterVolume(float volume) 
+    {
         if (volume < 0.0f) volume = 0.0f;
         if (volume > 1.0f) volume = 1.0f;
 

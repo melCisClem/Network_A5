@@ -61,7 +61,7 @@ constexpr int MAX_PROJECTILES = 100;
 constexpr int UDPPACKET_BUFFER_SIZE = 4096;
 
 constexpr int MAX_HP = 100;
-constexpr int BULLET_DAMAGE = 20;
+constexpr int BULLET_DAMAGE = 25;
 constexpr int PROJECTILE_TTL = 120; // ticks
 
 constexpr float tank_width = 0.04f;

@@ -36,6 +36,10 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 #include "../NetworkData.h"
 
 #define REQ_JOIN (unsigned char)0x06
+#define RETURN_CODE_1       1
+#define RETURN_CODE_2       2
+#define RETURN_CODE_3       3
+#define RETURN_CODE_4       4
 
 std::atomic<bool> g_running{ true };
 SOCKET g_serverUDPSocket = INVALID_SOCKET;
@@ -69,45 +73,61 @@ float g_moveSpeed = 0.015f;
 float g_turnSpeed = 3.0f;
 float g_bulletSpeed = 0.05f;
 
-static bool recvAll(SOCKET s, void* buf, int len) {
+
+// from A4
+static bool recvAll(SOCKET s, void* buf, int len) 
+{
     char* ptr = reinterpret_cast<char*>(buf);
     int rem = len;
-    while (rem > 0) {
+    while (rem > 0) 
+    {
         int r = recv(s, ptr, rem, 0);
-        if (r == SOCKET_ERROR || r == 0) return false;
+        if (r == SOCKET_ERROR || r == 0) 
+            return false;
         ptr += r; rem -= r;
     }
     return true;
 }
 
-static bool sendAll(SOCKET s, const void* data, int len) {
+// from A4
+static bool sendAll(SOCKET s, const void* data, int len) 
+{
     const char* ptr = reinterpret_cast<const char*>(data);
     int rem = len;
-    while (rem > 0) {
+    while (rem > 0) 
+    {
         int sent = send(s, ptr, rem, 0);
-        if (sent == SOCKET_ERROR || sent == 0) return false;
+        if (sent == SOCKET_ERROR || sent == 0) 
+            return false;
         ptr += sent; rem -= sent;
     }
     return true;
 }
 
-// Listen for inputs from ALL clients
-void udpReceiverThread() {
+// listen for inputs from ALL clients
+void udpReceiverThread() 
+{
     std::vector<char> buf(sizeof(InputPacket));
     sockaddr_in from{};
     int fromLen = sizeof(from);
 
+#ifdef _DEBUG
     std::cout << "[Server] Listening for client UDP inputs...\n";
+#endif
 
-    while (g_running) {
+    while (g_running) 
+    {
         int r = recvfrom(g_serverUDPSocket, buf.data(), (int)buf.size(), 0, (sockaddr*)&from, &fromLen);
-        if (r == sizeof(InputPacket)) {
+        if (r == sizeof(InputPacket)) 
+        {
             auto* pkt = reinterpret_cast<InputPacket*>(buf.data());
 
             uint32_t id = ntohl(pkt->playerID);
-            if (id < MAX_PLAYERS) {
+            if (id < MAX_PLAYERS) 
+            {
                 std::lock_guard<std::mutex> lk(g_stateMtx);
-                if (g_players[id].connected) {
+                if (g_players[id].connected) 
+                {
                     g_players[id].up = pkt->w_pressed;
                     g_players[id].down = pkt->s_pressed;
                     g_players[id].left = pkt->a_pressed;
@@ -120,24 +140,29 @@ void udpReceiverThread() {
 }
 
 // 60 Tick Game Loop
-void serverGameLoop() {
+void serverGameLoop() 
+{
     uint32_t sequence = 0;
-    std::cout << "[Server] Game loop started... tickrate 60\n";
+    std::cout << "[Server] Game loop started | tickrate 60\n";
 
-    while (g_running) {
+    while (g_running) 
+    {
         int activePlayers = 0;
         int activeProjectiles = 0;
         {
             std::lock_guard<std::mutex> lk(g_stateMtx);
 
             // reset audio flags at start of evrey tick
-            for (int i = 0; i < MAX_PLAYERS; i++) {
+            for (int i = 0; i < MAX_PLAYERS; i++) 
+            {
                 g_players[i].justShot = false;
                 g_players[i].justHit = false;
             }
 
-            for (int i = 0; i < MAX_PLAYERS; i++) {
-                if (g_players[i].connected) {
+            for (int i = 0; i < MAX_PLAYERS; i++) 
+            {
+                if (g_players[i].connected) 
+                {
                     activePlayers++;
 
                     // A n D
@@ -147,30 +172,37 @@ void serverGameLoop() {
                     float rad = g_players[i].aimAngle * 3.14159f / 180.0f;
 
                     // W n S
-                    if (g_players[i].up) {
+                    if (g_players[i].up) 
+                    {
                         float newX = g_players[i].x + cos(rad) * g_moveSpeed;
                         float newY = g_players[i].y + sin(rad) * g_moveSpeed;
 
-                        if (!isWall(newX, newY)) {
+                        if (!isWall(newX, newY)) 
+                        {
                             g_players[i].x = newX;
                             g_players[i].y = newY;
                         }
                     }
-                    if (g_players[i].down) {
+                    if (g_players[i].down)
+                    {
                         float newX = g_players[i].x - cos(rad) * g_moveSpeed;
                         float newY = g_players[i].y - sin(rad) * g_moveSpeed;
 
-                        if (!isWall(newX, newY)) {
+                        if (!isWall(newX, newY))
+                        {
                             g_players[i].x = newX;
                             g_players[i].y = newY;
                         }
                     }
 
-                    if (g_players[i].space && g_players[i].shootCooldown <= 0) {
-                        for (int j = 0; j < MAX_PROJECTILES; j++) {
-                            if (!g_projectiles[j].active) {
+                    if (g_players[i].space && g_players[i].shootCooldown <= 0) 
+                    {
+                        for (int j = 0; j < MAX_PROJECTILES; j++) 
+                        {
+                            if (!g_projectiles[j].active) 
+                            {
                                 g_projectiles[j].active = true;
-                                g_projectiles[j].lifeTimer = PROJECTILE_TTL; // 60 * 2 ticks
+                                g_projectiles[j].lifeTimer = PROJECTILE_TTL;
                                 g_projectiles[j].ownerID = i;
 
                                 float gunOffset = tank_width + tank_gunLength;
@@ -180,7 +212,7 @@ void serverGameLoop() {
                                 g_projectiles[j].vx = cos(rad) * g_bulletSpeed;
                                 g_projectiles[j].vy = sin(rad) * g_bulletSpeed;
 
-                                g_players[i].shootCooldown = tank_shootCooldown; // ticks
+                                g_players[i].shootCooldown = tank_shootCooldown;
                                 g_players[i].justShot = true;
                                 break;
                             }
@@ -191,8 +223,10 @@ void serverGameLoop() {
             }
 
             // update projectiles
-            for (int j = 0; j < MAX_PROJECTILES; j++) {
-                if (g_projectiles[j].active) {
+            for (int j = 0; j < MAX_PROJECTILES; j++) 
+            {
+                if (g_projectiles[j].active) 
+                {
                     g_projectiles[j].x += g_projectiles[j].vx;
                     g_projectiles[j].y += g_projectiles[j].vy;
                     g_projectiles[j].lifeTimer--;
@@ -200,20 +234,24 @@ void serverGameLoop() {
                     bool hitPlayer = false;
 
                     // check if projectile hit other player
-                    for (int p = 0; p < MAX_PLAYERS; p++) {
+                    for (int p = 0; p < MAX_PLAYERS; p++) 
+                    {
                         // cant hit ownself n dead players
-                        if (g_players[p].connected && p != g_projectiles[j].ownerID && g_players[p].hp > 0) {
+                        if (g_players[p].connected && p != g_projectiles[j].ownerID && g_players[p].hp > 0) 
+                        {
 
                             float dx = g_projectiles[j].x - g_players[p].x;
                             float dy = g_projectiles[j].y - g_players[p].y;
 
-                            if ((dx * dx + dy * dy) < (0.06f * 0.06f)) {
+                            if ((dx * dx + dy * dy) < (0.06f * 0.06f)) 
+                            {
                                 g_players[p].hp -= BULLET_DAMAGE;
                                 g_players[p].justHit = true;
 
                                 // respawn
-                                if (g_players[p].hp <= 0) {
-                                    g_players[p].x = 0.0f; // Respawn in the middle of the map
+                                if (g_players[p].hp <= 0) 
+                                {
+                                    g_players[p].x = 0.0f; //  middle of the map
                                     g_players[p].y = 0.0f;
                                     g_players[p].hp = MAX_HP;
                                 }
@@ -245,8 +283,10 @@ void serverGameLoop() {
             std::lock_guard<std::mutex> lk(g_stateMtx);
 
             // pack players 1st
-            for (int i = 0; i < MAX_PLAYERS; i++) {
-                if (g_players[i].connected) {
+            for (int i = 0; i < MAX_PLAYERS; i++) 
+            {
+                if (g_players[i].connected) 
+                {
                     PlayerState ps;
                     ps.playerID = htonl(i);
                     ps.x = g_players[i].x;
@@ -262,8 +302,10 @@ void serverGameLoop() {
             }
 
             // then pack proj
-            for (int j = 0; j < MAX_PROJECTILES; j++) {
-                if (g_projectiles[j].active) {
+            for (int j = 0; j < MAX_PROJECTILES; j++) 
+            {
+                if (g_projectiles[j].active)
+                {
                     ProjectileState proj;
                     proj.x = g_projectiles[j].x;
                     proj.y = g_projectiles[j].y;
@@ -275,11 +317,10 @@ void serverGameLoop() {
         // broadcast
         {
             std::lock_guard<std::mutex> lk(g_stateMtx);
-            for (int i = 0; i < MAX_PLAYERS; i++) {
-                if (g_players[i].connected) {
-                    sendto(g_serverUDPSocket, pktData.data(), (int)pktData.size(), 0,
-                        reinterpret_cast<sockaddr*>(&g_players[i].udpAddr), sizeof(g_players[i].udpAddr));
-                }
+            for (int i = 0; i < MAX_PLAYERS; i++) 
+            {
+                if (g_players[i].connected) 
+                    sendto(g_serverUDPSocket, pktData.data(), (int)pktData.size(), 0, reinterpret_cast<sockaddr*>(&g_players[i].udpAddr), sizeof(g_players[i].udpAddr));
             }
         }
 
@@ -287,25 +328,37 @@ void serverGameLoop() {
     }
 }
 
-int main() {
+int main()
+{
     WSADATA wsaData;
-    WSAStartup(MAKEWORD(2, 2), &wsaData);
+    SecureZeroMemory(&wsaData, sizeof(wsaData));
 
+    int errorCode = WSAStartup(WINSOCK_VERSION, &wsaData);
+    if (NO_ERROR != errorCode)
+    {
+        std::cerr << "WSAStartup() failed." << std::endl;
+        return errorCode;
+    }
+
+    // display to cmd for connecting
     char hostname[256];
-    if (gethostname(hostname, sizeof(hostname)) == 0) {
+    if (gethostname(hostname, sizeof(hostname)) == 0)
+    {
         addrinfo hints{}, * res = nullptr;
-        hints.ai_family = AF_INET; // IPv4 only
+        hints.ai_family = AF_INET; // IPv4
         hints.ai_socktype = SOCK_STREAM;
 
-        if (getaddrinfo(hostname, nullptr, &hints, &res) == 0) {
+        if (getaddrinfo(hostname, nullptr, &hints, &res) == 0) 
+        {
             std::cout << "Local Hostname: " << hostname << std::endl;
 
-            for (addrinfo* p = res; p != nullptr; p = p->ai_next) {
+            for (addrinfo* p = res; p != nullptr; p = p->ai_next) 
+            {
                 sockaddr_in* addr = reinterpret_cast<sockaddr_in*>(p->ai_addr);
                 char ipStr[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &addr->sin_addr, ipStr, sizeof(ipStr));
 
-                // Ignore the loopback address 127.0.0.1
+                // ignore the loopback address
                 if (std::string(ipStr) != "127.0.0.1")
                     std::cout << "Server IP Address: " << ipStr << std::endl;
             }
@@ -318,56 +371,82 @@ int main() {
     std::cout << "Listening on TCP Port: " << tcpPortStr << std::endl;
     std::cout << "Listening on UDP Port: " << udpPortStr << std::endl;
 
+    // TCP for establishing link
     addrinfo tcpHints{}, * tcpInfo = nullptr;
     tcpHints.ai_family = AF_INET;
     tcpHints.ai_socktype = SOCK_STREAM;
+    tcpHints.ai_protocol = IPPROTO_TCP;
     tcpHints.ai_flags = AI_PASSIVE;
     getaddrinfo(nullptr, tcpPortStr.c_str(), &tcpHints, &tcpInfo);
-    SOCKET listenerSocket = socket(tcpHints.ai_family, tcpHints.ai_socktype, IPPROTO_TCP);
-    bind(listenerSocket, tcpInfo->ai_addr, (int)tcpInfo->ai_addrlen);
+
+    SOCKET listenerSocket = socket(tcpHints.ai_family, tcpHints.ai_socktype, tcpHints.ai_protocol);
+    errorCode = bind(listenerSocket, tcpInfo->ai_addr, (int)tcpInfo->ai_addrlen);
+    if (errorCode != NO_ERROR)
+    {
+        std::cerr << "bind() TCP failed: " << WSAGetLastError() << std::endl;
+        closesocket(listenerSocket);
+        WSACleanup();
+        return RETURN_CODE_2;
+    }
     listen(listenerSocket, SOMAXCONN);
     freeaddrinfo(tcpInfo);
 
+    // UDP
     addrinfo udpHints{}, * udpInfo = nullptr;
     udpHints.ai_family = AF_INET;
     udpHints.ai_socktype = SOCK_DGRAM;
+    udpHints.ai_protocol = IPPROTO_UDP;
     udpHints.ai_flags = AI_PASSIVE;
     getaddrinfo(nullptr, udpPortStr.c_str(), &udpHints, &udpInfo);
-    g_serverUDPSocket = socket(udpHints.ai_family, udpHints.ai_socktype, IPPROTO_UDP);
-    bind(g_serverUDPSocket, udpInfo->ai_addr, (int)udpInfo->ai_addrlen);
+
+    g_serverUDPSocket = socket(udpHints.ai_family, udpHints.ai_socktype, udpHints.ai_protocol);
+    errorCode = bind(g_serverUDPSocket, udpInfo->ai_addr, (int)udpInfo->ai_addrlen);
+    if (errorCode != NO_ERROR)
+    {
+        std::cerr << "bind() UDP failed: " << WSAGetLastError() << std::endl;
+        closesocket(g_serverUDPSocket);
+        WSACleanup();
+        return RETURN_CODE_3;
+    }
     freeaddrinfo(udpInfo);
 
     std::cout << "Server running on TCP: " << tcpPortStr << ", UDP: " << udpPortStr << "\n";
-    std::cout << "Waiting for clients...\n";
 
     std::thread gameThread(serverGameLoop);
     std::thread udpThread(udpReceiverThread);
 
-    while (g_running) {
+    while (g_running) 
+    {
         sockaddr_in clientAddr{};
         int clientAddrLen = sizeof(clientAddr);
         SOCKET clientSocket = accept(listenerSocket, (sockaddr*)&clientAddr, &clientAddrLen);
 
-        if (clientSocket != INVALID_SOCKET) {
+        if (clientSocket != INVALID_SOCKET)
+        {
             char cmdBuf[1];
-            if (recvAll(clientSocket, cmdBuf, 1) && cmdBuf[0] == REQ_JOIN) {
+            if (recvAll(clientSocket, cmdBuf, 1) && cmdBuf[0] == REQ_JOIN)
+            {
                 uint32_t clientIP_net{};
                 uint16_t clientPort_net{};
 
-                if (recvAll(clientSocket, &clientIP_net, 4) && recvAll(clientSocket, &clientPort_net, 2)) {
+                if (recvAll(clientSocket, &clientIP_net, 4) && recvAll(clientSocket, &clientPort_net, 2)) 
+                {
 
                     int assignedID = -1;
                     {
                         std::lock_guard<std::mutex> lk(g_stateMtx);
 
-                        for (int i = 0; i < MAX_PLAYERS; i++) {
-                            if (!g_players[i].connected) {
+                        for (int i = 0; i < MAX_PLAYERS; i++) 
+                        {
+                            if (!g_players[i].connected) 
+                            {
                                 assignedID = i;
                                 break;
                             }
                         }
 
-                        if (assignedID != -1) {
+                        if (assignedID != -1) 
+                        {
                             g_players[assignedID].udpAddr.sin_family = AF_INET;
                             g_players[assignedID].udpAddr.sin_addr = clientAddr.sin_addr;
                             g_players[assignedID].udpAddr.sin_port = clientPort_net;
@@ -380,9 +459,12 @@ int main() {
                             int spawnMarker = assignedID + 2;
                             bool foundSpawn = false;
 
-                            for (int row = 0; row < MAP_HEIGHT; row++) {
-                                for (int col = 0; col < MAP_WIDTH; col++) {
-                                    if (ARENA_MAP[row][col] == spawnMarker) {
+                            for (int row = 0; row < MAP_HEIGHT; row++)
+                            {
+                                for (int col = 0; col < MAP_WIDTH; col++) 
+                                {
+                                    if (ARENA_MAP[row][col] == spawnMarker) 
+                                    {
 
                                         g_players[assignedID].x = ((col + 0.5f) * 2.0f / MAP_WIDTH) - 1.0f;
                                         g_players[assignedID].y = ((row + 0.5f) * 2.0f / MAP_HEIGHT) - 1.0f;
@@ -397,7 +479,8 @@ int main() {
                             }
 
                             // if nvr set spawn ptn then auto spawn in center
-                            if (!foundSpawn) {
+                            if (!foundSpawn) 
+                            {
                                 g_players[assignedID].x = 0.0f;
                                 g_players[assignedID].y = 0.0f;
                                 g_players[assignedID].aimAngle = 0.0f;
@@ -416,32 +499,34 @@ int main() {
                     char idMsg = static_cast<char>(assignedID);
                     sendAll(clientSocket, &idMsg, 1);
 
-                    if (assignedID != -1) {
+                    if (assignedID != -1)
+                    {
                         std::cout << "[Server] Player " << assignedID << " joined.\n";
 
-                        std::thread clientTCPThread([clientSocket, assignedID]() {
+                        std::thread clientTCPThread([clientSocket, assignedID]() 
+                        {
                             char dummy;
-                            while (recv(clientSocket, &dummy, 1, 0) > 0) {} // Block *only* this thread
+                            while (recv(clientSocket, &dummy, 1, 0) > 0) {} // Block only this thread
 
                             std::cout << "[Server] Player " << assignedID << " disconnected.\n";
                             std::lock_guard<std::mutex> lk(g_stateMtx);
                             g_players[assignedID].connected = false;
-                            g_players[assignedID].x = 10.0f; // Teleport them back off-screen
+                            g_players[assignedID].x = 10.0f; // teleport back off screen
                             g_players[assignedID].up = g_players[assignedID].down = g_players[assignedID].left = g_players[assignedID].right = false;
                             closesocket(clientSocket);
-                            });
-                        clientTCPThread.detach(); // Let the thread run free
+                        });
+                        clientTCPThread.detach();
 
                     }
-                    else {
+                    else 
+                    {
                         std::cout << "[Server] Rejected connection (Server Full).\n";
                         closesocket(clientSocket);
                     }
                 }
             }
-            else {
+            else
                 closesocket(clientSocket);
-            }
         }
     }
 
