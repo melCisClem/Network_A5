@@ -24,6 +24,7 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 #pragma pack(push, 1)
 struct PlayerState {
     uint32_t playerID;
+    char name[16];
     float x;
     float y;
     float aimAngle;
@@ -32,6 +33,7 @@ struct PlayerState {
     bool justShot;
     bool justHit;
     int32_t shootCooldown;
+    bool isReady;
 };
 
 struct ProjectileState {
@@ -41,8 +43,10 @@ struct ProjectileState {
 
 struct GameStateHeader {
     uint32_t sequenceNum;
+    uint32_t matchState; // 0 = waiting, 1 = in game, 2 = game over
     uint32_t numPlayers;
     uint32_t numProjectiles;
+    int32_t winnerID;
 };
 
 struct InputPacket {
@@ -72,6 +76,9 @@ constexpr float tank_outline_thickness = 2.0f;
 constexpr float tank_hp_thickness = 0.003f;
 constexpr int tank_shootCooldown = 120; // ticks
 
+constexpr int gameOverTimer = 300; // ticks so abt 5secs;
+
+// MAP stuff
 constexpr int MAP_WIDTH = 10;
 constexpr int MAP_HEIGHT = 10;
 
@@ -101,3 +108,4 @@ inline bool isWall(float x, float y) {
 
     return ARENA_MAP[row][col] == 1;
 }
+

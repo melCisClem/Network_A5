@@ -126,7 +126,6 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="Audiomanager.h" />
-    <ClInclude Include="Font.h" />
     <ClInclude Include="miniaudio.h" />
     <ClInclude Include="NetworkData.h" />
     <ClInclude Include="stb_truetype.h" />

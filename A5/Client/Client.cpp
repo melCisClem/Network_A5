@@ -37,13 +37,14 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 #include <cmath>
 #include <string>
 #include <map>
+#include <algorithm>
 
 #include "../NetworkData.h"
 
 #define MINIAUDIO_IMPLEMENTATION
 #include "../Audiomanager.h"
 
-#include "../Font.h"
+#include "../utils.h"
 
 #define REQ_JOIN (unsigned char)0x06
 #define RETURN_CODE_1       1
@@ -51,33 +52,11 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 #define RETURN_CODE_3       3
 #define RETURN_CODE_4       4
 
-
-std::atomic<bool> g_running{ true };
-SOCKET g_udpSocket = INVALID_SOCKET;
-
-std::mutex g_stateMtx;
-uint32_t g_lastSeq = 0;
-struct ClientPlayer {
-    float x, y;
-    float aimAngle;
-    int hp;
-    int kills;
-    int shootCooldown;
-}; 
-std::map<uint32_t, ClientPlayer> g_renderPlayers;
-std::vector<ProjectileState> g_renderProjectiles;
-
 AudioManager* g_audio = nullptr;
 constexpr const char* ingame_BGM_audio = "bgm.wav";
 constexpr const char* shooting_audio = "shoot.mp3";
 constexpr const char* explosion_audio = "explode.mp3";
 constexpr const char* mainmenu_BGM_audio = "mm_bgm.wav";
-
-bool g_isPaused = false;
-bool g_isTabbed = false;
-bool g_escWasPressed = false;
-bool g_tabWasPressed = false;
-float g_currentVolume = 0.5f; // 0.0 to 1.0
 
 // from A4
 static bool sendAll(SOCKET s, const void* data, int len) 
@@ -123,8 +102,21 @@ void udpReceiverThread()
         {
             auto* header = reinterpret_cast<GameStateHeader*>(buf.data());
             uint32_t seq = ntohl(header->sequenceNum);
+            uint32_t matchState = ntohl(header->matchState);
             uint32_t numPlayers = ntohl(header->numPlayers);
             uint32_t numProjs = ntohl(header->numProjectiles);
+
+            g_matchState = matchState;
+            g_winnerID = (int32_t)ntohl(header->winnerID);
+
+            if (matchState == 1 && g_appState == AppState::WAITING_ROOM)
+                g_appState = AppState::IN_GAME;
+            else if (matchState == 0 && g_appState == AppState::IN_GAME) 
+            {
+                g_appState = AppState::MAIN_MENU;
+                g_isPaused = false;
+                g_isTabbed = false;
+            }
 
             int expectedSize = sizeof(GameStateHeader) + (numPlayers * sizeof(PlayerState)) + (numProjs * sizeof(ProjectileState));
             if (r >= expectedSize) 
@@ -142,12 +134,15 @@ void udpReceiverThread()
                     {
                         auto* ps = reinterpret_cast<PlayerState*>(payloadPtr);
                         uint32_t pID = ntohl(ps->playerID);
+
+                        activePlayersThisTick[pID].name = std::string(ps->name);
                         activePlayersThisTick[pID].x = ps->x;
                         activePlayersThisTick[pID].y = ps->y;
                         activePlayersThisTick[pID].aimAngle = ps->aimAngle;
                         activePlayersThisTick[pID].hp = (int)ntohl(ps->hp);
                         activePlayersThisTick[pID].kills = (int)ntohl(ps->kills);
                         activePlayersThisTick[pID].shootCooldown = (int)ntohl(ps->shootCooldown);
+                        activePlayersThisTick[pID].isReady = ps->isReady;
 
                         if (g_audio)
                         {
@@ -174,39 +169,119 @@ void udpReceiverThread()
     }
 }
 
-void drawScoreboard(int winW, int winH)
+void drawWaitingRoom(int winW, int winH, float mouseX, float mouseY, bool mousePressed, bool& mouseWasPressed)
 {
-    // Dark Overlay
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glColor4f(0.0f, 0.0f, 0.0f, 0.7f);
-    glBegin(GL_QUADS);
-    glVertex2f(-1.0f, -1.0f); glVertex2f(1.0f, -1.0f);
-    glVertex2f(1.0f, 1.0f); glVertex2f(-1.0f, 1.0f);
-    glEnd();
-    glDisable(GL_BLEND);
+    glClearColor(0.15f, 0.15f, 0.2f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
 
     float centerX = winW * 0.5f;
-    float currentY = winH * 0.25f;
+    drawTextScreen(centerX - 180.0f, winH * 0.1f, "WAITING ROOM", 1.0f, 0.8f, 0.0f, g_fontMainMenuSmall, g_dataMainMenuSmall);
 
-    drawTextScreen(centerX - 190.f, currentY, "SCOREBOARD", 1.0f, 0.8f, 0.0f, g_fontScoreboardTitle, g_dataScoreboardTitle);
-    currentY += 60.f;
+    float currentY = 0.3f;
+    int connectedCount = 0;
+    bool amIReady = false;
 
-    // draw Players
-    std::lock_guard<std::mutex> lock(g_stateMtx);
-    for (const auto& pair : g_renderPlayers)
     {
-        uint32_t id = pair.first;
-        int kills = pair.second.kills;
+        std::lock_guard<std::mutex> lock(g_stateMtx);
+        for (const auto& pair : g_renderPlayers)
+        {
+            connectedCount++;
+            uint32_t id = pair.first;
+            bool isReady = pair.second.isReady;
 
-        std::string playerStr = "Player " + std::to_string(id);
-        std::string killStr = std::to_string(kills) + " Kills";
+            if (id == g_myPlayerID) amIReady = isReady;
 
-        drawTextScreen(centerX - 150.f, currentY, playerStr, 1.0f, 1.0f, 1.0f, g_fontScoreboard, g_dataScoreboard);
+            float pixelY = (1.0f - (currentY + 1.0f) * 0.5f) * winH;
 
-        drawTextScreen(centerX + 100.f, currentY, killStr, 1.0f, 0.8f, 0.2f, g_fontScoreboard, g_dataScoreboard);
+            std::string playerTxt = pair.second.name;
+            if (id == g_myPlayerID) playerTxt += " (YOU)";
 
-        currentY += 40.f;
+            drawTextScreen(centerX - 150.0f, pixelY, playerTxt, 1.0f, 1.0f, 1.0f, g_fontScoreboard, g_dataScoreboard);
+
+            if (isReady)
+                drawTextScreen(centerX + 50.0f, pixelY, "READY", 0.2f, 1.0f, 0.2f, g_fontScoreboard, g_dataScoreboard);
+            else
+                drawTextScreen(centerX + 50.0f, pixelY, "WAITING", 0.6f, 0.6f, 0.6f, g_fontScoreboard, g_dataScoreboard);
+
+            currentY -= 0.15f;
+        }
+    }
+
+    if (connectedCount == 0) {
+        float pixelY = (1.0f - (currentY + 1.0f) * 0.5f) * winH;
+        drawTextScreen(centerX - 100.0f, pixelY, "Connecting...", 0.5f, 0.5f, 0.5f, g_fontScoreboard, g_dataScoreboard);
+    }
+
+    // READY Button
+    float btnY = -0.6f;
+    bool isHovered = (mouseX >= -0.3f && mouseX <= 0.3f && mouseY >= btnY - 0.1f && mouseY <= btnY + 0.1f);
+
+    if (amIReady) glColor3f(0.1f, 0.6f, 0.1f);
+    else if (isHovered) glColor3f(0.5f, 0.5f, 0.5f);
+    else glColor3f(0.3f, 0.3f, 0.3f);
+
+    glBegin(GL_QUADS);
+    glVertex2f(-0.3f, btnY - 0.1f); glVertex2f(0.3f, btnY - 0.1f);
+    glVertex2f(0.3f, btnY + 0.1f);  glVertex2f(-0.3f, btnY + 0.1f);
+    glEnd();
+
+    float btnPixelY = (1.0f - (btnY + 1.0f) * 0.5f) * winH;
+    drawTextScreen(centerX - 50.0f, btnPixelY + 10.0f, amIReady ? "UNREADY" : "READY", 1.0f, 1.0f, 1.0f, g_fontScoreboard, g_dataScoreboard);
+
+    if (isHovered && mousePressed && !mouseWasPressed)
+    {
+        char req = REQ_TOGGLE_READY;
+        sendAll(g_tcpSocket, &req, 1);
+    }
+}
+
+void drawMainMenu(int winW, int winH, float mouseX, float mouseY, bool mousePressed, bool& mouseWasPressed)
+{
+    glClearColor(0.15f, 0.15f, 0.2f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    float centerX = winW * 0.5f;
+
+    drawTextScreen(centerX - 210.f, winH * 0.2f, "TANK WARS", 1.f, 0.6f, 0.1f, g_fontMainMenuLarge, g_dataMainMenuLarge);
+
+    float btnWidth = 0.4f;
+    float btnHeight = 0.1f;
+
+    float playY = 0.1f;
+    float progY = -0.2f;
+    float quitY = -0.5f;
+
+    struct Button { float y; std::string text; int action; };
+    Button buttons[] = {
+        { playY, "PLAY", 1 },
+        { progY, "EXP", 2 },
+        { quitY, "QUIT", 3 }
+    };
+
+    for (const auto& btn : buttons)
+    {
+        bool isHovered = (mouseX >= -btnWidth && mouseX <= btnWidth && mouseY >= btn.y - btnHeight && mouseY <= btn.y + btnHeight);
+
+        glColor3f(isHovered ? 0.4f : 0.2f, isHovered ? 0.4f : 0.2f, isHovered ? 0.4f : 0.2f);
+        glBegin(GL_QUADS);
+        glVertex2f(-btnWidth, btn.y - btnHeight);
+        glVertex2f(btnWidth, btn.y - btnHeight);
+        glVertex2f(btnWidth, btn.y + btnHeight);
+        glVertex2f(-btnWidth, btn.y + btnHeight);
+        glEnd();
+
+        float textPixelY = (1.f - (btn.y + 1.f) * 0.5f) * winH;
+        drawTextScreen(centerX - 55.f, textPixelY + 20.f, btn.text, 1.f, 1.f, 1.f, g_fontMainMenuSmall, g_dataMainMenuSmall);
+
+        if (isHovered && mousePressed && !mouseWasPressed)
+        {
+            if (btn.action == 1)
+            {
+                g_appState = AppState::WAITING_ROOM;
+            }
+            if (btn.action == 2) std::cout << "idk bruh rubric wants this nonsense .-.\n";
+            if (btn.action == 3) g_running = false;
+        }
     }
 }
 
@@ -254,6 +329,12 @@ int main()
     std::getline(std::cin, input);
     serverIPStr = input.empty() ? detectedIP : input;
 
+    std::cout << "Enter Player Name (15 char max): ";
+    std::string nameInput;
+    std::getline(std::cin, nameInput);
+    if (!nameInput.empty())
+        g_playerName = nameInput;
+
     std::string tcpPortStr = "27015";
     uint16_t serverUDPPort = 27016;
 
@@ -268,7 +349,7 @@ int main()
 #ifdef _DEBUG
     std::cout << "[Client] Attempting to connect to " << serverIPStr << "..." << std::endl;
 #endif
-    SOCKET g_tcpSocket = socket(tcpHints.ai_family, tcpHints.ai_socktype, tcpHints.ai_protocol);
+    g_tcpSocket = socket(tcpHints.ai_family, tcpHints.ai_socktype, tcpHints.ai_protocol);
     errorCode = connect(g_tcpSocket, tcpInfo->ai_addr, (int)tcpInfo->ai_addrlen);
     if (SOCKET_ERROR == errorCode)
     {
@@ -305,6 +386,10 @@ int main()
     std::vector<char> msg;
     msg.push_back(REQ_JOIN);
 
+    char nameBuf[16] = { 0 };
+    strncpy_s(nameBuf, g_playerName.c_str(), 15);
+    msg.insert(msg.end(), nameBuf, nameBuf + 16);
+
     uint32_t zeroIp = 0;
     msg.insert(msg.end(), reinterpret_cast<char*>(&zeroIp), reinterpret_cast<char*>(&zeroIp) + 4);
     msg.insert(msg.end(), reinterpret_cast<char*>(&myUDPPort), reinterpret_cast<char*>(&myUDPPort) + 2);
@@ -317,8 +402,8 @@ int main()
         std::cerr << "Server is full or rejected connection.\n";
         return 1;
     }
-    uint32_t myPlayerID = static_cast<uint32_t>(idRsp);
-    std::cout << "[Client] Joined as Player " << myPlayerID << "\n";
+    g_myPlayerID = static_cast<uint32_t>(idRsp);
+    std::cout << "[Client] Joined as Player " << g_myPlayerID << "\n";
 
     // setup server UDP info
     sockaddr_in serverUdpAddr{};
@@ -334,7 +419,7 @@ int main()
     if (!glfwInit()) 
         return -1;
 
-    std::string title = "Player " + std::to_string(myPlayerID);
+    std::string title = "TANK WARS";
     GLFWwindow* window = glfwCreateWindow(600, 600, title.c_str(), NULL, NULL);
     if (!window) 
     { 
@@ -346,187 +431,238 @@ int main()
     g_fontPlayerName = loadFont("arial.ttf", 10.f, g_dataPlayerName);
     g_fontScoreboard = loadFont("arial.ttf", 20.f, g_dataScoreboard);
     g_fontScoreboardTitle = loadFont("arial.ttf", 60.f, g_dataScoreboardTitle);
+    g_fontMainMenuLarge = loadFont("arial.ttf", 80.f, g_dataMainMenuLarge);
+    g_fontMainMenuSmall = loadFont("arial.ttf", 50.f, g_dataMainMenuSmall);
+    g_fontTiny = loadFont("arial.ttf", 14.f, g_dataTiny);
 
     uint32_t inputSeq = 0;
     while (!glfwWindowShouldClose(window) && g_running) 
     {
         bool isFocused = glfwGetWindowAttrib(window, GLFW_FOCUSED) != 0;
 
-        // pause menu detection esc
-        bool escPressed = isFocused && (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS);
-        if (escPressed && !g_escWasPressed)
-        {
-            if (g_isTabbed)
-            {
-                g_isTabbed = false;
-                g_isPaused = true;
-            }
-            else
-                g_isPaused = !g_isPaused;
-        }
-        g_escWasPressed = escPressed;
+        int fbW, fbH, winW, winH;
+        glfwGetFramebufferSize(window, &fbW, &fbH);
+        glfwGetWindowSize(window, &winW, &winH);
+        glViewport(0, 0, fbW, fbH);
 
-        if (g_isPaused && isFocused) 
-        {
-            if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS) 
-            {
-                g_currentVolume += 0.01f;
-                if (g_currentVolume > 1.0f) g_currentVolume = 1.0f;
-                if (g_audio) g_audio->SetMasterVolume(g_currentVolume);
-            }
-            if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS) 
-            {
-                g_currentVolume -= 0.01f;
-                if (g_currentVolume < 0.0f) g_currentVolume = 0.0f;
-                if (g_audio) g_audio->SetMasterVolume(g_currentVolume);
-            }
-        }
-
-        // scoreboard detection tab
-        bool tabPressed = isFocused && (glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS);
-        if (tabPressed && !g_tabWasPressed)
-        {
-            if (g_isPaused)
-            {
-                g_isPaused = false;
-                g_isTabbed = true;
-            }
-            else
-                g_isTabbed = !g_isTabbed;
-        }
-        g_tabWasPressed = tabPressed;
-
-        // hide cursor in game show in pause menu
-        if (g_isPaused || g_isTabbed)
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-        else
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+        double xpos, ypos;
+        glfwGetCursorPos(window, &xpos, &ypos);
+        float mouseX = (float)((xpos / winW) * 2.0 - 1.0);
+        float mouseY = (float)(1.0 - (ypos / winH) * 2.0);
 
         static bool mouseWasPressed = false;
         bool mousePressed = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-        if (g_isPaused && mousePressed) 
+
+        if (g_appState == AppState::MAIN_MENU)
         {
-            using namespace UI;
-
-            double xpos, ypos;
-            glfwGetCursorPos(window, &xpos, &ypos);
-
-            int width, height;
-            glfwGetWindowSize(window, &width, &height);
-            float mouseX = (float)((xpos / width) * 2.0 - 1.0);
-            float mouseY = (float)(1.0 - (ypos / height) * 2.0);
-
-            barY = -0.1f;
-            double buttonRadius_sq = buttonRadius * buttonRadius;
-            gap = 0.08f;
-            barHalfWidth = 0.4f;
-
-            // check for vol control
-            float volumeChange = 0.001f;
-            double distMinus_sq = pow(mouseX - (-barHalfWidth - gap), 2) + pow(mouseY - barY, 2);
-            if (distMinus_sq <= buttonRadius_sq) 
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            drawMainMenu(winW, winH, mouseX, mouseY, mousePressed, mouseWasPressed);
+        }
+        else if (g_appState == AppState::WAITING_ROOM)
+        {
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            drawWaitingRoom(winW, winH, mouseX, mouseY, mousePressed, mouseWasPressed);
+        }
+        else if (g_appState == AppState::IN_GAME)
+        {
+            // pause menu detection esc
+            bool escPressed = isFocused && (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS);
+            if (escPressed && !g_escWasPressed)
             {
-                g_currentVolume = fmaxf(0.0f, g_currentVolume - volumeChange);
-                if (g_audio) 
-                    g_audio->SetMasterVolume(g_currentVolume);
+                if (g_isTabbed)
+                {
+                    g_isTabbed = false;
+                    g_isPaused = true;
+                }
+                else
+                    g_isPaused = !g_isPaused;
             }
-            double distPlus_sq = pow(mouseX - (barHalfWidth + gap), 2) + pow(mouseY - barY, 2);
-            if (distPlus_sq <= buttonRadius_sq) 
+            g_escWasPressed = escPressed;
+
+            // scoreboard detection tab
+            bool tabPressed = isFocused && (glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS);
+            if (tabPressed && !g_tabWasPressed)
             {
-                g_currentVolume = fminf(1.0f, g_currentVolume + volumeChange);
-                if (g_audio) 
-                    g_audio->SetMasterVolume(g_currentVolume);
+                if (g_isPaused)
+                {
+                    g_isPaused = false;
+                    g_isTabbed = true;
+                }
+                else
+                    g_isTabbed = !g_isTabbed;
+            }
+            g_tabWasPressed = tabPressed;
+
+            static bool PWasPressed = false;
+            bool PPressed = isFocused && (glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS);
+            if (PPressed && !PWasPressed)
+            {
+                char req = REQ_CHEAT_WIN;
+                sendAll(g_tcpSocket, &req, 1);
+            }
+            PWasPressed = PPressed;
+
+            // hide cursor in game show in pause menu
+            if (g_isPaused || g_isTabbed)
+                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            else
+                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+
+            // Pause Menu Interactions Volume n Quit
+            if (g_isPaused && isFocused)
+            {
+                if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS)
+                {
+                    g_currentVolume += 0.01f;
+                    if (g_currentVolume > 1.0f) g_currentVolume = 1.0f;
+                    if (g_audio) g_audio->SetMasterVolume(g_currentVolume);
+                }
+                if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS)
+                {
+                    g_currentVolume -= 0.01f;
+                    if (g_currentVolume < 0.0f) g_currentVolume = 0.0f;
+                    if (g_audio) g_audio->SetMasterVolume(g_currentVolume);
+                }
+
+                if (mousePressed) {
+                    using namespace UI;
+                    barY = -0.1f; gap = 0.08f; barHalfWidth = 0.4f;
+                    double buttonRadius_sq = buttonRadius * buttonRadius;
+
+                    // check for vol control
+                    float volumeChange = 0.001f;
+                    double distMinus_sq = pow(mouseX - (-barHalfWidth - gap), 2) + pow(mouseY - barY, 2);
+                    if (distMinus_sq <= buttonRadius_sq)
+                    {
+                        g_currentVolume = fmaxf(0.0f, g_currentVolume - volumeChange);
+                        if (g_audio)
+                            g_audio->SetMasterVolume(g_currentVolume);
+                    }
+                    double distPlus_sq = pow(mouseX - (barHalfWidth + gap), 2) + pow(mouseY - barY, 2);
+                    if (distPlus_sq <= buttonRadius_sq)
+                    {
+                        g_currentVolume = fminf(1.0f, g_currentVolume + volumeChange);
+                        if (g_audio)
+                            g_audio->SetMasterVolume(g_currentVolume);
+                    }
+
+                    // check for quit button to go back to main menu
+                    if (!mouseWasPressed)
+                    {
+                        quitY = -0.4f;
+                        quitSize = 0.06f;
+                        if (mouseX >= -quitSize && mouseX <= quitSize && mouseY >= quitY - quitSize && mouseY <= quitY + quitSize)
+                            AppState::MAIN_MENU;
+                    }
+                }
             }
 
-            // check for quit button
-            if (!mouseWasPressed) 
+            // send input data pkt
+            InputPacket inputPkt;
+            inputPkt.sequenceNum = htonl(inputSeq++);
+            inputPkt.playerID = htonl(g_myPlayerID);
+
+            inputPkt.w_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS);
+            inputPkt.a_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS);
+            inputPkt.s_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS);
+            inputPkt.d_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS);
+            inputPkt.space_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
+            inputPkt.aimAngle = 0.0f;
+
+            sendto(g_udpSocket, reinterpret_cast<const char*>(&inputPkt), sizeof(inputPkt), 0, (sockaddr*)&serverUdpAddr, sizeof(serverUdpAddr));
+
+            // render
+            glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+
+            drawMap();
+
+            std::map<uint32_t, ClientPlayer> playersToDraw;
+            std::vector<ProjectileState> projsToDraw;
             {
-                quitY = -0.4f;
-                quitSize = 0.06f;
-                if (mouseX >= -quitSize && mouseX <= quitSize && mouseY >= quitY - quitSize && mouseY <= quitY + quitSize)
-                    g_running = false;
+                std::lock_guard<std::mutex> lock(g_stateMtx);
+                playersToDraw = g_renderPlayers;
+                projsToDraw = g_renderProjectiles;
             }
+
+            // draw tanks
+            for (const auto& pair : playersToDraw)
+            {
+                uint32_t id = pair.first;
+                float px = pair.second.x;
+                float py = pair.second.y;
+                float pAngle = pair.second.aimAngle;
+                int pHP = pair.second.hp;
+                int pShootCD = pair.second.shootCooldown;
+
+                float r = 0.2f, g = 0.2f, b = 0.2f;
+                if (id % 4 == 0) r = 0.8f;                      // Player 0: Red
+                else if (id % 4 == 1) g = 0.8f;                 // Player 1: Green
+                else if (id % 4 == 2) b = 0.8f;                 // Player 2: Blue
+                else if (id % 4 == 3) { r = 0.8f; g = 0.8f; }   // Player 3: Yellow
+
+                bool isMe = (id == g_myPlayerID);
+                drawTank(px, py, r, g, b, pAngle, pHP, pShootCD, isMe);
+            }
+
+            // draw proj
+            for (const auto& proj : projsToDraw)
+                drawProjectile(proj.x, proj.y);
+
+            // draw floating name
+            for (const auto& pair : playersToDraw)
+            {
+                uint32_t id = pair.first;
+                std::string playerName = pair.second.name;
+                float px = pair.second.x;
+                float py = pair.second.y;
+
+                int winW, winH;
+                glfwGetWindowSize(window, &winW, &winH);
+                float screenX = (px + 1.0f) * 0.5f * winW;
+                float screenY = (1.0f - (py + 1.0f) * 0.5f) * winH;
+
+                drawTextScreen(screenX - 15, screenY - 25, playerName, 1.0f, 1.0f, 1.0f, g_fontPlayerName, g_dataPlayerName);
+            }
+
+            // game over 
+            if (g_matchState == 2 && g_winnerID != -1)
+            {
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glColor4f(0.0f, 0.0f, 0.0f, 0.85f);
+                glBegin(GL_QUADS);
+                glVertex2f(-1.0f, -1.0f); glVertex2f(1.0f, -1.0f);
+                glVertex2f(1.0f, 1.0f); glVertex2f(-1.0f, 1.0f);
+                glEnd();
+                glDisable(GL_BLEND);
+
+                std::string winText;
+                if (g_winnerID == g_myPlayerID) 
+                {
+                    winText = "VICTORY!";
+                    drawTextScreen((winW * 0.5f) - 198.f, winH * 0.5f, winText, 0.2f, 1.0f, 0.2f, g_fontMainMenuLarge, g_dataMainMenuLarge);
+                }
+                else 
+                {
+                    std::string winnerName = "Player";
+                    if (playersToDraw.count(g_winnerID)) winnerName = playersToDraw[g_winnerID].name;
+
+                    winText = winnerName + " WON!";
+                    drawTextScreen((winW * 0.5f) - 198.f, winH * 0.5f, winText, 1.0f, 0.8f, 0.0f, g_fontMainMenuLarge, g_dataMainMenuLarge);
+                }
+                drawTextScreen((winW * 0.5f) - 190.0f, (winH * 0.5f) + 80.0f, "Returning to Main Menu...", 0.6f, 0.6f, 0.6f, g_fontTiny, g_dataTiny);
+            }
+
+            // (Keep your g_isPaused and g_isTabbed checks down here!)
+
+            if (g_isPaused)
+                drawPauseMenu(g_currentVolume);
+
+            if (g_isTabbed)
+                drawScoreboard(winW, winH);
         }
         mouseWasPressed = mousePressed;
-
-        // send input data pkt
-        InputPacket inputPkt;
-        inputPkt.sequenceNum = htonl(inputSeq++);
-        inputPkt.playerID = htonl(myPlayerID);
-        
-        inputPkt.w_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS);
-        inputPkt.a_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS);
-        inputPkt.s_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS);
-        inputPkt.d_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS);
-        inputPkt.space_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
-        inputPkt.aimAngle = 0.0f;
-
-        sendto(g_udpSocket, reinterpret_cast<const char*>(&inputPkt), sizeof(inputPkt), 0, (sockaddr*)&serverUdpAddr, sizeof(serverUdpAddr));
-
-        // render
-        int fbW, fbH;
-        glfwGetFramebufferSize(window, &fbW, &fbH);
-        glViewport(0, 0, fbW, fbH);
-        glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-
-        drawMap();
-
-        std::map<uint32_t, ClientPlayer> playersToDraw;
-        std::vector<ProjectileState> projsToDraw;
-        {
-            std::lock_guard<std::mutex> lock(g_stateMtx);
-            playersToDraw = g_renderPlayers;
-            projsToDraw = g_renderProjectiles;
-        }
-
-        for (const auto& pair : playersToDraw) 
-        {
-            uint32_t id = pair.first;
-            float px = pair.second.x;
-            float py = pair.second.y;
-            float pAngle = pair.second.aimAngle;
-            int pHP = pair.second.hp;
-            int pShootCD = pair.second.shootCooldown;
-
-            float r = 0.2f, g = 0.2f, b = 0.2f;
-            if (id % 4 == 0) r = 0.8f;                      // Player 0: Red
-            else if (id % 4 == 1) g = 0.8f;                 // Player 1: Green
-            else if (id % 4 == 2) b = 0.8f;                 // Player 2: Blue
-            else if (id % 4 == 3) { r = 0.8f; g = 0.8f; }   // Player 3: Yellow
-
-            bool isMe = (id == myPlayerID);
-            drawTank(px, py, r, g, b, pAngle, pHP, pShootCD, isMe);
-        }
-
-        for (const auto& proj : projsToDraw)
-            drawProjectile(proj.x, proj.y);
-
-        // draw floating player name
-        for (const auto& pair : playersToDraw) 
-        {
-            uint32_t id = pair.first;
-            float px = pair.second.x;
-            float py = pair.second.y;
-
-            int winW, winH;
-            glfwGetWindowSize(window, &winW, &winH);
-            float screenX = (px + 1.0f) * 0.5f * winW;
-            float screenY = (1.0f - (py + 1.0f) * 0.5f) * winH;
-
-            std::string nameLabel = "Player " + std::to_string(id);
-            drawTextScreen(screenX - 15, screenY - 25, nameLabel, 1.0f, 1.0f, 1.0f, g_fontPlayerName, g_dataPlayerName);
-        }
-
-        if (g_isPaused)
-            drawPauseMenu(g_currentVolume);
-
-        if (g_isTabbed)
-        {
-            int winW, winH;
-            glfwGetWindowSize(window, &winW, &winH);
-            drawScoreboard(winW, winH);
-        }
 
         glfwSwapBuffers(window);
         glfwPollEvents();

@@ -8,11 +8,12 @@ glfw3.4
 
 
 ### Tank Game controls
-- W to move forward
-- S to reverse
-- A to turn left
-- D to turn right
-- SPACE to shoot
+W to move forward
+S to reverse
+A to turn left
+D to turn right
+SPACE to shoot
+P to insta win (cheat key)
 
 The red bar above the tank represents your hp
 The blue bar represents the shot cooldown that turns green when ready to shoot

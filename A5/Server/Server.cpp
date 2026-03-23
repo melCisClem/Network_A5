@@ -36,6 +36,8 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 #include "../NetworkData.h"
 
 #define REQ_JOIN (unsigned char)0x06
+#define REQ_TOGGLE_READY (unsigned char)0x09
+#define REQ_CHEAT_WIN    (unsigned char)0x0A
 #define RETURN_CODE_1       1
 #define RETURN_CODE_2       2
 #define RETURN_CODE_3       3
@@ -46,12 +48,14 @@ SOCKET g_serverUDPSocket = INVALID_SOCKET;
 
 struct Player {
     sockaddr_in udpAddr{};
+    std::string name = "Player";
     float x = 10.0f, y = 10.0f;
     float aimAngle = 0.0f;
     int shootCooldown = 0;
     int hp = MAX_HP;
     int kills = 0;
     bool connected = false;
+    bool isReady = false;
     bool up = false, down = false, left = false, right = false;
     bool space = false;
     bool justShot = false;
@@ -67,6 +71,10 @@ struct Projectile {
 };
 
 std::mutex g_stateMtx;
+int g_matchState = 0;
+int g_winnerID = -1;
+int g_gameOverTimer = 0;
+
 Player g_players[MAX_PLAYERS];
 Projectile g_projectiles[MAX_PROJECTILES];
 
@@ -149,6 +157,7 @@ void serverGameLoop()
     while (g_running) 
     {
         int activePlayers = 0;
+        int readyPlayers = 0;
         int activeProjectiles = 0;
         {
             std::lock_guard<std::mutex> lk(g_stateMtx);
@@ -158,128 +167,174 @@ void serverGameLoop()
             {
                 g_players[i].justShot = false;
                 g_players[i].justHit = false;
-            }
-
-            for (int i = 0; i < MAX_PLAYERS; i++) 
-            {
                 if (g_players[i].connected) 
                 {
                     activePlayers++;
-
-                    // A n D
-                    if (g_players[i].left)  g_players[i].aimAngle += g_turnSpeed; // CCW
-                    if (g_players[i].right) g_players[i].aimAngle -= g_turnSpeed; // CW
-
-                    float rad = g_players[i].aimAngle * 3.14159f / 180.0f;
-
-                    // W n S
-                    if (g_players[i].up) 
-                    {
-                        float newX = g_players[i].x + cos(rad) * g_moveSpeed;
-                        float newY = g_players[i].y + sin(rad) * g_moveSpeed;
-
-                        if (!isWall(newX, newY)) 
-                        {
-                            g_players[i].x = newX;
-                            g_players[i].y = newY;
-                        }
-                    }
-                    if (g_players[i].down)
-                    {
-                        float newX = g_players[i].x - cos(rad) * g_moveSpeed;
-                        float newY = g_players[i].y - sin(rad) * g_moveSpeed;
-
-                        if (!isWall(newX, newY))
-                        {
-                            g_players[i].x = newX;
-                            g_players[i].y = newY;
-                        }
-                    }
-
-                    if (g_players[i].space && g_players[i].shootCooldown <= 0) 
-                    {
-                        for (int j = 0; j < MAX_PROJECTILES; j++) 
-                        {
-                            if (!g_projectiles[j].active) 
-                            {
-                                g_projectiles[j].active = true;
-                                g_projectiles[j].lifeTimer = PROJECTILE_TTL;
-                                g_projectiles[j].ownerID = i;
-
-                                float gunOffset = tank_width + tank_gunLength;
-                                g_projectiles[j].x = g_players[i].x + cos(rad) * gunOffset;
-                                g_projectiles[j].y = g_players[i].y + sin(rad) * gunOffset;
-
-                                g_projectiles[j].vx = cos(rad) * g_bulletSpeed;
-                                g_projectiles[j].vy = sin(rad) * g_bulletSpeed;
-
-                                g_players[i].shootCooldown = tank_shootCooldown;
-                                g_players[i].justShot = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (g_players[i].shootCooldown > 0) g_players[i].shootCooldown--;
+                    if (g_players[i].isReady) 
+                        readyPlayers++;
                 }
             }
 
-            // update projectiles
-            for (int j = 0; j < MAX_PROJECTILES; j++) 
+            if (g_matchState == 0) // waiting room
             {
-                if (g_projectiles[j].active) 
+                if (activePlayers > 0 && activePlayers == readyPlayers) 
                 {
-                    g_projectiles[j].x += g_projectiles[j].vx;
-                    g_projectiles[j].y += g_projectiles[j].vy;
-                    g_projectiles[j].lifeTimer--;
-
-                    bool hitPlayer = false;
-
-                    // check if projectile hit other player
-                    for (int p = 0; p < MAX_PLAYERS; p++) 
-                    {
-                        // cant hit ownself n dead players
-                        if (g_players[p].connected && p != g_projectiles[j].ownerID && g_players[p].hp > 0) 
-                        {
-
-                            float dx = g_projectiles[j].x - g_players[p].x;
-                            float dy = g_projectiles[j].y - g_players[p].y;
-
-                            if ((dx * dx + dy * dy) < (0.06f * 0.06f)) 
-                            {
-                                g_players[p].hp -= BULLET_DAMAGE;
-                                g_players[p].justHit = true;
-
-                                // respawn
-                                if (g_players[p].hp <= 0) 
-                                {
-                                    g_players[p].x = 0.0f; //  middle of the map
-                                    g_players[p].y = 0.0f;
-                                    g_players[p].hp = MAX_HP;
-
-                                    int shooterID = g_projectiles[j].ownerID;
-                                    if (shooterID != -1 && g_players[shooterID].connected)
-                                        g_players[shooterID].kills++;
-                                }
-                                hitPlayer = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    // kill old proj
-                    if (g_projectiles[j].lifeTimer <= 0 || isWall(g_projectiles[j].x, g_projectiles[j].y) || hitPlayer)
-                        g_projectiles[j].active = false;
-                    else
-                        activeProjectiles++;
+                    g_matchState = 1;
+                    std::cout << "[Server] All players ready! STARTING MATCH!\n";
                 }
             }
+            else if (g_matchState == 1) // in game
+            {
+                for (int i = 0; i < MAX_PLAYERS; i++)
+                {
+                    if (g_players[i].connected)
+                    {
+                        // A n D
+                        if (g_players[i].left)  g_players[i].aimAngle += g_turnSpeed; // CCW
+                        if (g_players[i].right) g_players[i].aimAngle -= g_turnSpeed; // CW
+
+                        float rad = g_players[i].aimAngle * 3.14159f / 180.0f;
+
+                        // W n S
+                        if (g_players[i].up)
+                        {
+                            float newX = g_players[i].x + cos(rad) * g_moveSpeed;
+                            float newY = g_players[i].y + sin(rad) * g_moveSpeed;
+
+                            if (!isWall(newX, newY))
+                            {
+                                g_players[i].x = newX;
+                                g_players[i].y = newY;
+                            }
+                        }
+                        if (g_players[i].down)
+                        {
+                            float newX = g_players[i].x - cos(rad) * g_moveSpeed;
+                            float newY = g_players[i].y - sin(rad) * g_moveSpeed;
+
+                            if (!isWall(newX, newY))
+                            {
+                                g_players[i].x = newX;
+                                g_players[i].y = newY;
+                            }
+                        }
+
+                        if (g_players[i].space && g_players[i].shootCooldown <= 0)
+                        {
+                            for (int j = 0; j < MAX_PROJECTILES; j++)
+                            {
+                                if (!g_projectiles[j].active)
+                                {
+                                    g_projectiles[j].active = true;
+                                    g_projectiles[j].lifeTimer = PROJECTILE_TTL;
+                                    g_projectiles[j].ownerID = i;
+
+                                    float gunOffset = tank_width + tank_gunLength;
+                                    g_projectiles[j].x = g_players[i].x + cos(rad) * gunOffset;
+                                    g_projectiles[j].y = g_players[i].y + sin(rad) * gunOffset;
+
+                                    g_projectiles[j].vx = cos(rad) * g_bulletSpeed;
+                                    g_projectiles[j].vy = sin(rad) * g_bulletSpeed;
+
+                                    g_players[i].shootCooldown = tank_shootCooldown;
+                                    g_players[i].justShot = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (g_players[i].shootCooldown > 0) g_players[i].shootCooldown--;
+                    }
+                }
+
+                // update projectiles
+                for (int j = 0; j < MAX_PROJECTILES; j++) 
+                {
+                    if (g_projectiles[j].active) 
+                    {
+                        g_projectiles[j].x += g_projectiles[j].vx;
+                        g_projectiles[j].y += g_projectiles[j].vy;
+                        g_projectiles[j].lifeTimer--;
+
+                        bool hitPlayer = false;
+
+                        // check if projectile hit other player
+                        for (int p = 0; p < MAX_PLAYERS; p++) 
+                        {
+                            // cant hit ownself n dead players
+                            if (g_players[p].connected && p != g_projectiles[j].ownerID && g_players[p].hp > 0) 
+                            {
+
+                                float dx = g_projectiles[j].x - g_players[p].x;
+                                float dy = g_projectiles[j].y - g_players[p].y;
+
+                                if ((dx * dx + dy * dy) < (0.06f * 0.06f)) 
+                                {
+                                    g_players[p].hp -= BULLET_DAMAGE;
+                                    g_players[p].justHit = true;
+
+                                    // respawn
+                                    if (g_players[p].hp <= 0) 
+                                    {
+                                        g_players[p].x = 0.0f; //  middle of the map
+                                        g_players[p].y = 0.0f;
+                                        g_players[p].hp = MAX_HP;
+
+                                        int shooterID = g_projectiles[j].ownerID;
+                                        if (shooterID != -1 && g_players[shooterID].connected) 
+                                        {
+                                            g_players[shooterID].kills++;
+
+                                            // check for win cond
+                                            if (g_players[shooterID].kills >= 5 && g_matchState == 1) 
+                                            {
+                                                g_matchState = 2;
+                                                g_winnerID = shooterID;
+                                                g_gameOverTimer = gameOverTimer; // 5 seconds ( 60 * 5 )
+                                                std::cout << "[Server] Player " << shooterID << " won!\n";
+                                            }
+                                        }
+                                    }
+                                    hitPlayer = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        // kill old proj
+                        if (g_projectiles[j].lifeTimer <= 0 || isWall(g_projectiles[j].x, g_projectiles[j].y) || hitPlayer)
+                            g_projectiles[j].active = false;
+                        else
+                            activeProjectiles++;
+                    }
+                }
+            }
+            else if (g_matchState == 2)
+            {
+                g_gameOverTimer--;
+                if (g_gameOverTimer <= 0)
+                {
+                    for (int i = 0; i < MAX_PLAYERS; i++) 
+                    {
+                        g_players[i].isReady = false;
+                        g_players[i].kills = 0;
+                        g_players[i].hp = MAX_HP;
+                        g_projectiles[i].active = false;
+                    }
+                    g_matchState = 0;
+                    g_winnerID = -1;
+                    std::cout << "[Server] Match reset. Returning players to menus.\n";
+                }
+            }
+
         }
 
         // building the packet
         GameStateHeader header;
         header.sequenceNum = htonl(sequence++);
+        header.matchState = htonl(g_matchState);
         header.numPlayers = htonl(activePlayers);
         header.numProjectiles = htonl(activeProjectiles);
+        header.winnerID = htonl(g_winnerID);
 
         std::vector<char> pktData;
         pktData.insert(pktData.end(), reinterpret_cast<char*>(&header), reinterpret_cast<char*>(&header) + sizeof(header));
@@ -294,6 +349,7 @@ void serverGameLoop()
                 {
                     PlayerState ps;
                     ps.playerID = htonl(i);
+                    strncpy_s(ps.name, g_players[i].name.c_str(), 15);
                     ps.x = g_players[i].x;
                     ps.y = g_players[i].y;
                     ps.aimAngle = g_players[i].aimAngle;
@@ -302,6 +358,7 @@ void serverGameLoop()
                     ps.justShot = g_players[i].justShot;
                     ps.justHit = g_players[i].justHit;
                     ps.shootCooldown = htonl((uint32_t)g_players[i].shootCooldown);
+                    ps.isReady = g_players[i].isReady;
 
                     pktData.insert(pktData.end(), reinterpret_cast<char*>(&ps), reinterpret_cast<char*>(&ps) + sizeof(ps));
                 }
@@ -432,10 +489,13 @@ int main()
             char cmdBuf[1];
             if (recvAll(clientSocket, cmdBuf, 1) && cmdBuf[0] == REQ_JOIN)
             {
+                char nameBuf[16];
                 uint32_t clientIP_net{};
                 uint16_t clientPort_net{};
 
-                if (recvAll(clientSocket, &clientIP_net, 4) && recvAll(clientSocket, &clientPort_net, 2)) 
+                if (recvAll(clientSocket, nameBuf, 16) &&
+                    recvAll(clientSocket, &clientIP_net, 4) &&
+                    recvAll(clientSocket, &clientPort_net, 2))
                 {
 
                     int assignedID = -1;
@@ -457,6 +517,9 @@ int main()
                             g_players[assignedID].udpAddr.sin_addr = clientAddr.sin_addr;
                             g_players[assignedID].udpAddr.sin_port = clientPort_net;
                             g_players[assignedID].connected = true;
+
+                            nameBuf[15] = '\0';
+                            g_players[assignedID].name = std::string(nameBuf);
 
                             char ipStr[INET_ADDRSTRLEN];
                             inet_ntop(AF_INET, &clientIP_net, ipStr, INET_ADDRSTRLEN);
@@ -509,15 +572,36 @@ int main()
                     {
                         std::cout << "[Server] Player " << assignedID << " joined.\n";
 
-                        std::thread clientTCPThread([clientSocket, assignedID]() 
+                        std::thread clientTCPThread([clientSocket, assignedID]()
                         {
-                            char dummy;
-                            while (recv(clientSocket, &dummy, 1, 0) > 0) {} // Block only this thread
+                            char cmdBuf[1];
+                            while (recv(clientSocket, cmdBuf, 1, 0) > 0)
+                            {
+                                if (cmdBuf[0] == REQ_TOGGLE_READY)
+                                {
+                                    std::lock_guard<std::mutex> lk(g_stateMtx);
+                                    g_players[assignedID].isReady = !g_players[assignedID].isReady;
+                                    std::cout << "[Server] Player " << assignedID << " is now "
+                                        << (g_players[assignedID].isReady ? "READY" : "UNREADY") << "\n";
+                                }
+                                else if (cmdBuf[0] == REQ_CHEAT_WIN)
+                                {
+                                    std::lock_guard<std::mutex> lk(g_stateMtx);
+
+                                    if (g_matchState == 1)
+                                    {
+                                        g_matchState = 2;
+                                        g_winnerID = assignedID;
+                                        g_gameOverTimer = gameOverTimer;  // 5 sec
+                                        std::cout << "[Server] Player " << assignedID << " used the INSTA-WIN cheat!\n";
+                                    }
+                                }
+                            }
 
                             std::cout << "[Server] Player " << assignedID << " disconnected.\n";
                             std::lock_guard<std::mutex> lk(g_stateMtx);
                             g_players[assignedID].connected = false;
-                            g_players[assignedID].x = 10.0f; // teleport back off screen
+                            g_players[assignedID].x = 10.0f;
                             g_players[assignedID].up = g_players[assignedID].down = g_players[assignedID].left = g_players[assignedID].right = false;
                             closesocket(clientSocket);
                         });
