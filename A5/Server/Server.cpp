@@ -38,6 +38,7 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 #define REQ_JOIN (unsigned char)0x06
 #define REQ_TOGGLE_READY (unsigned char)0x09
 #define REQ_CHEAT_WIN    (unsigned char)0x0A
+#define REQ_CHAT         (unsigned char)0x0B
 #define RETURN_CODE_1       1
 #define RETURN_CODE_2       2
 #define RETURN_CODE_3       3
@@ -48,6 +49,7 @@ SOCKET g_serverUDPSocket = INVALID_SOCKET;
 
 struct Player {
     sockaddr_in udpAddr{};
+    SOCKET tcpSocket = INVALID_SOCKET;
     std::string name = "Player";
     float x = 10.0f, y = 10.0f;
     float aimAngle = 0.0f;
@@ -516,6 +518,7 @@ int main()
                             g_players[assignedID].udpAddr.sin_family = AF_INET;
                             g_players[assignedID].udpAddr.sin_addr = clientAddr.sin_addr;
                             g_players[assignedID].udpAddr.sin_port = clientPort_net;
+                            g_players[assignedID].tcpSocket = clientSocket;
                             g_players[assignedID].connected = true;
 
                             nameBuf[15] = '\0';
@@ -596,11 +599,46 @@ int main()
                                         std::cout << "[Server] Player " << assignedID << " used the INSTA-WIN cheat!\n";
                                     }
                                 }
+                                else if (cmdBuf[0] == REQ_CHAT)
+                                {
+                                    uint16_t msgLenNet;
+                                    if (recvAll(clientSocket, &msgLenNet, 2))
+                                    {
+                                        uint16_t msgLen = ntohs(msgLenNet);
+                                        std::vector<char> msgBuf(msgLen + 1, '\0');
+                                        if (recvAll(clientSocket, msgBuf.data(), msgLen))
+                                        {
+                                            std::string senderName;
+                                            {
+                                                std::lock_guard<std::mutex> lk(g_stateMtx);
+                                                senderName = g_players[assignedID].name;
+                                            }
+                                            std::string fullMsg = senderName + ": " + msgBuf.data();
+                                            uint16_t fullLen = (uint16_t)fullMsg.length();
+                                            uint16_t fullLenNet = htons(fullLen);
+
+                                            std::vector<char> broadcastPkt;
+                                            broadcastPkt.push_back(REQ_CHAT);
+                                            broadcastPkt.insert(broadcastPkt.end(), reinterpret_cast<char*>(&fullLenNet), reinterpret_cast<char*>(&fullLenNet) + 2);
+                                            broadcastPkt.insert(broadcastPkt.end(), fullMsg.begin(), fullMsg.end());
+
+                                            std::lock_guard<std::mutex> lk(g_stateMtx);
+                                            for (int i = 0; i < MAX_PLAYERS; i++)
+                                            {
+                                                if (g_players[i].connected && g_players[i].tcpSocket != INVALID_SOCKET)
+                                                {
+                                                    sendAll(g_players[i].tcpSocket, broadcastPkt.data(), (int)broadcastPkt.size());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
                             std::cout << "[Server] Player " << assignedID << " disconnected.\n";
                             std::lock_guard<std::mutex> lk(g_stateMtx);
                             g_players[assignedID].connected = false;
+                            g_players[assignedID].tcpSocket = INVALID_SOCKET;
                             g_players[assignedID].x = 10.0f;
                             g_players[assignedID].up = g_players[assignedID].down = g_players[assignedID].left = g_players[assignedID].right = false;
                             closesocket(clientSocket);
