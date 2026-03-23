@@ -59,7 +59,7 @@
     <PostBuildEvent>
       <Command>if not exist "$(SolutionDir)..\build" mkdir "$(SolutionDir)..\build"
 copy /Y "$(TargetPath)" "$(SolutionDir)..\build"
-xcopy /E /Y /I "$(ProjectDir)..\Audio" "$(ProjectDir)..\..\build\Audio"</Command>
+xcopy /E /Y /I "$(ProjectDir)..\Assets" "$(ProjectDir)..\..\build\Assets"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">

@@ -1,8 +1,10 @@
+
+
 #pragma once
 #include <iostream>
 #include <string>
-#include <fstream>
-#include <windows.h>
+
+#include "utils.h"
 
 // supress warning from miniaudio the external library i use for audio
 #pragma warning(push)
@@ -16,46 +18,6 @@ private:
     ma_engine engine;
     ma_sound currentBGM;
     bool isBgmLoaded;
-
-    bool FileExists(const std::string& path) 
-    {
-        std::ifstream f(path.c_str());
-        return f.good();
-    }
-
-    std::string FindAudioFile(const std::string& filename) 
-    {
-        if (FileExists(filename)) // check current dir
-            return filename;
-
-        char buffer[MAX_PATH];
-        GetModuleFileNameA(NULL, buffer, MAX_PATH);
-        std::string exePath(buffer);
-        std::string exeDir = exePath.substr(0, exePath.find_last_of("\\/"));
-
-        std::string pathsToTry[] = {
-            exeDir + "\\" + filename,
-            exeDir + "\\Audio\\" + filename,
-            exeDir + "\\..\\" + filename,
-            exeDir + "\\..\\Audio\\" + filename,
-            exeDir + "\\..\\..\\" + filename, 
-            exeDir + "\\..\\..\\Audio\\" + filename
-        };
-
-        for (const std::string& path : pathsToTry) 
-        {
-            if (FileExists(path)) 
-            {
-#ifdef _DEBUG
-                std::cout << "[Audio] Found " << filename << " at: " << path << "\n";
-#endif
-                return path;
-            }
-        }
-
-        std::cerr << "[Audio] WARNING: Could not find " << filename << " anywhere!\n";
-        return filename;
-    }
 
 public:
     AudioManager() 
@@ -81,7 +43,7 @@ public:
             isBgmLoaded = false;
         }
 
-        std::string actualPath = FindAudioFile(filename);
+        std::string actualPath = FindAssetsFile(filename);
         ma_result result = ma_sound_init_from_file(&engine, actualPath.c_str(), 0, NULL, NULL, &currentBGM);
         if (result == MA_SUCCESS) 
         {
@@ -94,7 +56,7 @@ public:
 
     void PlaySFX(const std::string& filename)
     {
-        std::string actualPath = FindAudioFile(filename);
+        std::string actualPath = FindAssetsFile(filename);
         ma_result result = ma_engine_play_sound(&engine, actualPath.c_str(), NULL);
 
         if (result != MA_SUCCESS)

@@ -28,6 +28,7 @@ struct PlayerState {
     float y;
     float aimAngle;
     int32_t hp;
+    int32_t kills;
     bool justShot;
     bool justHit;
     int32_t shootCooldown;

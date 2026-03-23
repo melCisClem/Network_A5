@@ -50,6 +50,7 @@ struct Player {
     float aimAngle = 0.0f;
     int shootCooldown = 0;
     int hp = MAX_HP;
+    int kills = 0;
     bool connected = false;
     bool up = false, down = false, left = false, right = false;
     bool space = false;
@@ -254,6 +255,10 @@ void serverGameLoop()
                                     g_players[p].x = 0.0f; //  middle of the map
                                     g_players[p].y = 0.0f;
                                     g_players[p].hp = MAX_HP;
+
+                                    int shooterID = g_projectiles[j].ownerID;
+                                    if (shooterID != -1 && g_players[shooterID].connected)
+                                        g_players[shooterID].kills++;
                                 }
                                 hitPlayer = true;
                                 break;
@@ -293,6 +298,7 @@ void serverGameLoop()
                     ps.y = g_players[i].y;
                     ps.aimAngle = g_players[i].aimAngle;
                     ps.hp = htonl((uint32_t)g_players[i].hp);
+                    ps.kills = htonl((uint32_t)g_players[i].kills);
                     ps.justShot = g_players[i].justShot;
                     ps.justHit = g_players[i].justHit;
                     ps.shootCooldown = htonl((uint32_t)g_players[i].shootCooldown);

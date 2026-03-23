@@ -43,11 +43,14 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 #define MINIAUDIO_IMPLEMENTATION
 #include "../Audiomanager.h"
 
+#include "../Font.h"
+
 #define REQ_JOIN (unsigned char)0x06
 #define RETURN_CODE_1       1
 #define RETURN_CODE_2       2
 #define RETURN_CODE_3       3
 #define RETURN_CODE_4       4
+
 
 std::atomic<bool> g_running{ true };
 SOCKET g_udpSocket = INVALID_SOCKET;
@@ -58,6 +61,7 @@ struct ClientPlayer {
     float x, y;
     float aimAngle;
     int hp;
+    int kills;
     int shootCooldown;
 }; 
 std::map<uint32_t, ClientPlayer> g_renderPlayers;
@@ -70,7 +74,9 @@ constexpr const char* explosion_audio = "explode.mp3";
 constexpr const char* mainmenu_BGM_audio = "mm_bgm.wav";
 
 bool g_isPaused = false;
+bool g_isTabbed = false;
 bool g_escWasPressed = false;
+bool g_tabWasPressed = false;
 float g_currentVolume = 0.5f; // 0.0 to 1.0
 
 // from A4
@@ -140,6 +146,7 @@ void udpReceiverThread()
                         activePlayersThisTick[pID].y = ps->y;
                         activePlayersThisTick[pID].aimAngle = ps->aimAngle;
                         activePlayersThisTick[pID].hp = (int)ntohl(ps->hp);
+                        activePlayersThisTick[pID].kills = (int)ntohl(ps->kills);
                         activePlayersThisTick[pID].shootCooldown = (int)ntohl(ps->shootCooldown);
 
                         if (g_audio)
@@ -167,166 +174,7 @@ void udpReceiverThread()
     }
 }
 
-void drawMap() 
-{
-    float cellW = 2.0f / MAP_WIDTH;
-    float cellH = 2.0f / MAP_HEIGHT;
-
-    glBegin(GL_QUADS);
-    glColor3f(0.3f, 0.3f, 0.3f); // Dark Gray Walls
-
-    for (int row = 0; row < MAP_HEIGHT; row++) 
-    {
-        for (int col = 0; col < MAP_WIDTH; col++) 
-        {
-            if (ARENA_MAP[row][col] == 1) {
-                // calc the bottom left corner of the grid cell
-                float x1 = -1.0f + (col * cellW);
-                float y1 = -1.0f + (row * cellH);
-
-                // calc the top-right corner
-                float x2 = x1 + cellW;
-                float y2 = y1 + cellH;
-
-                glVertex2f(x1, y1); // Bottom-left
-                glVertex2f(x2, y1); // Bottom-right
-                glVertex2f(x2, y2); // Top-right
-                glVertex2f(x1, y2); // Top-left
-            }
-        }
-    }
-    glEnd();
-}
-
-// draws tank, hp bar, shot cooldown bar
-void drawTank(float x, float y, float r, float g, float b, float facingAngle, int hp, int cooldown, bool isLocalPlayer) 
-{
-    float width = tank_width;
-    float height = tank_height;
-    float gunLength = tank_gunLength;
-    float outline_thickness = tank_outline_thickness;
-    float hp_thickness = tank_hp_thickness;
-
-    glPushMatrix();
-    glTranslatef(x, y, 0.0f); 
-
-    // Draw HP n Cooldown bar
-    glPushMatrix();
-    glTranslatef(0.0f, height + 0.04f, 0.0f); // hp bar above tank body
-
-    float BarWidth = width * 0.9f;
-    float BarHeight = hp_thickness;
-
-    // Draw Dark Background
-    glBegin(GL_QUADS);
-    glColor3f(0.2f, 0.2f, 0.2f);
-    glVertex2f(-BarWidth, -BarHeight);
-    glVertex2f(BarWidth, -BarHeight);
-    glVertex2f(BarWidth, BarHeight);
-    glVertex2f(-BarWidth, BarHeight);
-    glEnd();
-
-    // Draw Red HP Bar
-    float hpPct = fmax(0.0f, (float)hp / (float)MAX_HP);
-    float currentWidth = -BarWidth + (2.0f * BarWidth * hpPct);
-
-    glBegin(GL_QUADS);
-    glColor3f(0.9f, 0.1f, 0.1f);
-    glVertex2f(-BarWidth, -BarHeight);
-    glVertex2f(currentWidth, -BarHeight);
-    glVertex2f(currentWidth, BarHeight);
-    glVertex2f(-BarWidth, BarHeight);
-    glEnd();
-
-    // Draw Shoot Cooldown bar
-    float maxCD = (float)tank_shootCooldown;
-    float cooldownPct = (maxCD - (float)cooldown) / maxCD;
-
-    if (cooldownPct < 0.0f) cooldownPct = 0.0f;
-    if (cooldownPct > 1.0f) cooldownPct = 1.0f;
-
-    float cdFill = -BarWidth + (2.0f * BarWidth * cooldownPct);
-    float cdY = -0.01f; // Positioned below HP bar
-    float cdHeight = hp_thickness;
-
-    // Background
-    glColor3f(0.1f, 0.1f, 0.1f); // Dark gray
-    glBegin(GL_QUADS);
-    glVertex2f(-BarWidth, cdY);
-    glVertex2f(BarWidth, cdY);
-    glVertex2f(BarWidth, cdY + cdHeight);
-    glVertex2f(-BarWidth, cdY + cdHeight);
-    glEnd();
-
-    if (cooldown > 0)
-        glColor3f(0.3f, 0.8f, 1.0f); // Loading Cyan
-    else
-        glColor3f(0.2f, 0.8f, 0.2f); // Ready Green
-
-    glBegin(GL_QUADS);
-    glVertex2f(-BarWidth, cdY);
-    glVertex2f(cdFill, cdY);
-    glVertex2f(cdFill, cdY + cdHeight);
-    glVertex2f(-BarWidth, cdY + cdHeight);
-    glEnd();
-
-    glPopMatrix();
-
-    
-    glRotatef(facingAngle, 0.0f, 0.0f, 1.0f);
-
-    // draw gun barrel
-    glLineWidth(4.0f);
-    glBegin(GL_LINES);
-    glColor3f(0.6f, 0.6f, 0.6f);
-    glVertex2f(0.0f, 0.0f);
-    glVertex2f(width + gunLength, 0.0f);
-    glEnd();
-    glLineWidth(1.0f);
-
-    // draw Body
-    glBegin(GL_QUADS);
-    glColor3f(r, g, b);
-    glVertex2f(-width, -height); // Bottom-left
-    glVertex2f(width, -height); // Bottom-right
-    glVertex2f(width, height); // Top-right
-    glVertex2f(-width, height); // Top-left
-    glEnd();
-
-    // draw outline only for local player
-    if (isLocalPlayer) {
-        glLineWidth(outline_thickness);
-        glBegin(GL_LINE_LOOP);
-        glColor3f(1.0f, 1.0f, 1.0f);
-
-        float offset = 0.001f;
-        glVertex2f(-width - offset, -height - offset);
-        glVertex2f(width + offset, -height - offset);
-        glVertex2f(width + offset, height + offset);
-        glVertex2f(-width - offset, height + offset);
-        glEnd();
-        glLineWidth(1.0f);
-    }
-
-    glPopMatrix();
-}
-
-void drawProjectile(float x, float y) 
-{
-    glPushMatrix();
-    glTranslatef(x, y, 0.0f);
-    glBegin(GL_POLYGON);
-    glColor3f(1.0f, 1.0f, 0.0f); // yellow
-    for (int i = 0; i < 360; i += 30) 
-    {
-        float theta = i * 3.14159f / 180.0f;
-        glVertex2f(0.02f * cos(theta), 0.02f * sin(theta));
-    }
-    glEnd();
-    glPopMatrix();
-}
-
-void drawPauseMenu() 
+void drawScoreboard(int winW, int winH)
 {
     // Dark Overlay
     glEnable(GL_BLEND);
@@ -338,75 +186,28 @@ void drawPauseMenu()
     glEnd();
     glDisable(GL_BLEND);
 
-    // Pause Icon
-    glColor3f(1.0f, 1.0f, 1.0f);
-    glBegin(GL_QUADS);
-    glVertex2f(-0.08f, 0.2f); glVertex2f(-0.03f, 0.2f); glVertex2f(-0.03f, 0.4f); glVertex2f(-0.08f, 0.4f);
-    glVertex2f(0.03f, 0.2f); glVertex2f(0.08f, 0.2f); glVertex2f(0.08f, 0.4f); glVertex2f(0.03f, 0.4f);
-    glEnd();
+    float centerX = winW * 0.5f;
+    float currentY = winH * 0.25f;
 
-    // Volume Bar Background
-    float barY = -0.1f;
-    float barHalfWidth = 0.4f;
-    glColor3f(0.3f, 0.3f, 0.3f);
-    glBegin(GL_QUADS);
-    glVertex2f(-barHalfWidth, barY - 0.02f); glVertex2f(barHalfWidth, barY - 0.02f);
-    glVertex2f(barHalfWidth, barY + 0.02f); glVertex2f(-barHalfWidth, barY + 0.02f);
-    glEnd();
+    drawTextScreen(centerX - 190.f, currentY, "SCOREBOARD", 1.0f, 0.8f, 0.0f, g_fontScoreboardTitle, g_dataScoreboardTitle);
+    currentY += 60.f;
 
-    // Volume Bar Fill
-    float fillRight = -barHalfWidth + (g_currentVolume * (barHalfWidth * 2.0f));
-    glColor3f(0.2f, 0.8f, 0.2f);
-    glBegin(GL_QUADS);
-    glVertex2f(-barHalfWidth, barY - 0.02f); glVertex2f(fillRight, barY - 0.02f);
-    glVertex2f(fillRight, barY + 0.02f); glVertex2f(-barHalfWidth, barY + 0.02f);
-    glEnd();
-
-    // Circular Buttons with a small gap
-    float buttonRadius = 0.05f;
-    float gap = 0.08f;
-
-    // Minus Button (Left)
-    glColor3f(0.8f, 0.2f, 0.2f);
-    float minusCenterX = -barHalfWidth - gap;
-    glBegin(GL_POLYGON);
-    for (int i = 0; i < 360; i += 20) 
+    // draw Players
+    std::lock_guard<std::mutex> lock(g_stateMtx);
+    for (const auto& pair : g_renderPlayers)
     {
-        float theta = i * 3.14159f / 180.0f;
-        glVertex2f(minusCenterX + buttonRadius * cos(theta), barY + buttonRadius * sin(theta));
+        uint32_t id = pair.first;
+        int kills = pair.second.kills;
+
+        std::string playerStr = "Player " + std::to_string(id);
+        std::string killStr = std::to_string(kills) + " Kills";
+
+        drawTextScreen(centerX - 150.f, currentY, playerStr, 1.0f, 1.0f, 1.0f, g_fontScoreboard, g_dataScoreboard);
+
+        drawTextScreen(centerX + 100.f, currentY, killStr, 1.0f, 0.8f, 0.2f, g_fontScoreboard, g_dataScoreboard);
+
+        currentY += 40.f;
     }
-    glEnd();
-
-    // Plus Button (Right)
-    glColor3f(0.2f, 0.8f, 0.2f);
-    float plusCenterX = barHalfWidth + gap;
-    glBegin(GL_POLYGON);
-    for (int i = 0; i < 360; i += 20) 
-    {
-        float theta = i * 3.14159f / 180.0f;
-        glVertex2f(plusCenterX + buttonRadius * cos(theta), barY + buttonRadius * sin(theta));
-    }
-    glEnd();
-
-    // Quit Button (A red square with a white X)
-    float quitY = -0.4f; // Positioned below the volume bar
-    float quitSize = 0.06f;
-
-    // Red Background
-    glColor3f(0.8f, 0.2f, 0.2f);
-    glBegin(GL_QUADS);
-    glVertex2f(-quitSize, quitY - quitSize); glVertex2f(quitSize, quitY - quitSize);
-    glVertex2f(quitSize, quitY + quitSize); glVertex2f(-quitSize, quitY + quitSize);
-    glEnd();
-
-    // White X
-    glColor3f(1.0f, 1.0f, 1.0f);
-    glLineWidth(2.0f);
-    glBegin(GL_LINES);
-    glVertex2f(-0.03f, quitY - 0.03f); glVertex2f(0.03f, quitY + 0.03f);
-    glVertex2f(0.03f, quitY - 0.03f); glVertex2f(-0.03f, quitY + 0.03f);
-    glEnd();
-    glLineWidth(1.0f);
 }
 
 int main() 
@@ -448,7 +249,7 @@ int main()
     res = nullptr;
 
     std::string serverIPStr;
-    std::cout << "Enter Server IPv4 [Default: " << detectedIP << "]: ";
+    std::cout << "Enter Server IPv4 [Press Enter auto fill]: ";
     std::string input;
     std::getline(std::cin, input);
     serverIPStr = input.empty() ? detectedIP : input;
@@ -542,16 +343,27 @@ int main()
     }
     glfwMakeContextCurrent(window);
 
-    uint32_t inputSeq = 0;
+    g_fontPlayerName = loadFont("arial.ttf", 10.f, g_dataPlayerName);
+    g_fontScoreboard = loadFont("arial.ttf", 20.f, g_dataScoreboard);
+    g_fontScoreboardTitle = loadFont("arial.ttf", 60.f, g_dataScoreboardTitle);
 
+    uint32_t inputSeq = 0;
     while (!glfwWindowShouldClose(window) && g_running) 
     {
         bool isFocused = glfwGetWindowAttrib(window, GLFW_FOCUSED) != 0;
 
-        // pause menu
+        // pause menu detection esc
         bool escPressed = isFocused && (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS);
         if (escPressed && !g_escWasPressed)
-            g_isPaused = !g_isPaused;
+        {
+            if (g_isTabbed)
+            {
+                g_isTabbed = false;
+                g_isPaused = true;
+            }
+            else
+                g_isPaused = !g_isPaused;
+        }
         g_escWasPressed = escPressed;
 
         if (g_isPaused && isFocused) 
@@ -570,8 +382,22 @@ int main()
             }
         }
 
+        // scoreboard detection tab
+        bool tabPressed = isFocused && (glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS);
+        if (tabPressed && !g_tabWasPressed)
+        {
+            if (g_isPaused)
+            {
+                g_isPaused = false;
+                g_isTabbed = true;
+            }
+            else
+                g_isTabbed = !g_isTabbed;
+        }
+        g_tabWasPressed = tabPressed;
+
         // hide cursor in game show in pause menu
-        if (g_isPaused) 
+        if (g_isPaused || g_isTabbed)
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
         else
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
@@ -580,6 +406,8 @@ int main()
         bool mousePressed = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
         if (g_isPaused && mousePressed) 
         {
+            using namespace UI;
+
             double xpos, ypos;
             glfwGetCursorPos(window, &xpos, &ypos);
 
@@ -588,10 +416,10 @@ int main()
             float mouseX = (float)((xpos / width) * 2.0 - 1.0);
             float mouseY = (float)(1.0 - (ypos / height) * 2.0);
 
-            float barY = -0.1f;
-            double buttonRadius_sq = 0.05f * 0.05f;
-            float gap = 0.08f;
-            float barHalfWidth = 0.4f;
+            barY = -0.1f;
+            double buttonRadius_sq = buttonRadius * buttonRadius;
+            gap = 0.08f;
+            barHalfWidth = 0.4f;
 
             // check for vol control
             float volumeChange = 0.001f;
@@ -613,8 +441,8 @@ int main()
             // check for quit button
             if (!mouseWasPressed) 
             {
-                float quitY = -0.4f;
-                float quitSize = 0.06f;
+                quitY = -0.4f;
+                quitSize = 0.06f;
                 if (mouseX >= -quitSize && mouseX <= quitSize && mouseY >= quitY - quitSize && mouseY <= quitY + quitSize)
                     g_running = false;
             }
@@ -626,16 +454,19 @@ int main()
         inputPkt.sequenceNum = htonl(inputSeq++);
         inputPkt.playerID = htonl(myPlayerID);
         
-        inputPkt.w_pressed = !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS);
-        inputPkt.a_pressed = !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS);
-        inputPkt.s_pressed = !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS);
-        inputPkt.d_pressed = !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS);
-        inputPkt.space_pressed = isFocused && (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
+        inputPkt.w_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS);
+        inputPkt.a_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS);
+        inputPkt.s_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS);
+        inputPkt.d_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS);
+        inputPkt.space_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
         inputPkt.aimAngle = 0.0f;
 
         sendto(g_udpSocket, reinterpret_cast<const char*>(&inputPkt), sizeof(inputPkt), 0, (sockaddr*)&serverUdpAddr, sizeof(serverUdpAddr));
 
         // render
+        int fbW, fbH;
+        glfwGetFramebufferSize(window, &fbW, &fbH);
+        glViewport(0, 0, fbW, fbH);
         glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
@@ -671,8 +502,31 @@ int main()
         for (const auto& proj : projsToDraw)
             drawProjectile(proj.x, proj.y);
 
+        // draw floating player name
+        for (const auto& pair : playersToDraw) 
+        {
+            uint32_t id = pair.first;
+            float px = pair.second.x;
+            float py = pair.second.y;
+
+            int winW, winH;
+            glfwGetWindowSize(window, &winW, &winH);
+            float screenX = (px + 1.0f) * 0.5f * winW;
+            float screenY = (1.0f - (py + 1.0f) * 0.5f) * winH;
+
+            std::string nameLabel = "Player " + std::to_string(id);
+            drawTextScreen(screenX - 15, screenY - 25, nameLabel, 1.0f, 1.0f, 1.0f, g_fontPlayerName, g_dataPlayerName);
+        }
+
         if (g_isPaused)
-            drawPauseMenu();
+            drawPauseMenu(g_currentVolume);
+
+        if (g_isTabbed)
+        {
+            int winW, winH;
+            glfwGetWindowSize(window, &winW, &winH);
+            drawScoreboard(winW, winH);
+        }
 
         glfwSwapBuffers(window);
         glfwPollEvents();
