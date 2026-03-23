@@ -88,6 +88,78 @@ static bool recvAll(SOCKET s, void* buf, int len)
     return true;
 }
 
+std::atomic<bool> g_isTyping{ false };
+std::string g_currentChatInput = "";
+std::vector<std::string> g_chatMessages;
+std::mutex g_chatMtx;
+std::atomic<float> g_chatTimer{ 0.0f };
+bool g_enterWasPressed = false;
+bool g_backspaceWasPressed = false;
+
+void charCallback(GLFWwindow* window, unsigned int codepoint)
+{
+    if (g_isTyping && codepoint < 128)
+    {
+        g_currentChatInput += (char)codepoint;
+    }
+}
+
+void tcpReceiverThread()
+{
+    char cmdBuf[1];
+    while (g_running)
+    {
+        if (recv(g_tcpSocket, cmdBuf, 1, 0) > 0)
+        {
+            if (cmdBuf[0] == REQ_CHAT)
+            {
+                uint16_t fullLenNet;
+                if (recvAll(g_tcpSocket, &fullLenNet, 2))
+                {
+                    uint16_t fullLen = ntohs(fullLenNet);
+                    std::vector<char> fullMsgBuf(fullLen + 1, '\0');
+                    if (recvAll(g_tcpSocket, fullMsgBuf.data(), fullLen))
+                    {
+                        std::lock_guard<std::mutex> lock(g_chatMtx);
+                        g_chatMessages.push_back(fullMsgBuf.data());
+                        if (g_chatMessages.size() > 5)
+                            g_chatMessages.erase(g_chatMessages.begin());
+                        
+                        g_chatTimer = 10.0f; // Reset timer on new message
+                    }
+                }
+            }
+        }
+        else
+        {
+            g_running = false;
+            break;
+        }
+    }
+}
+
+void drawChat(int winW, int winH)
+{
+    if (g_chatTimer > 0.0f || g_isTyping)
+    {
+        float startY = winH - 250.0f;
+        {
+            std::lock_guard<std::mutex> lock(g_chatMtx);
+            for (const auto& msg : g_chatMessages)
+            {
+                drawTextScreen(20.0f, startY, msg, 1.0f, 1.0f, 1.0f, g_fontTiny, g_dataTiny);
+                startY += 20.0f;
+            }
+        }
+    }
+
+    if (g_isTyping)
+    {
+        std::string typingText = "CHAT: " + g_currentChatInput + "_";
+        drawTextScreen(20.0f, winH - 100.0f, typingText, 1.0f, 1.0f, 0.0f, g_fontTiny, g_dataTiny);
+    }
+}
+
 void udpReceiverThread() 
 {
     std::vector<char> buf(UDPPACKET_BUFFER_SIZE);
@@ -415,6 +487,7 @@ int main()
     g_audio->PlayBGM(ingame_BGM_audio);
 
     std::thread tUDP(udpReceiverThread);
+    std::thread tTCP(tcpReceiverThread);
 
     if (!glfwInit()) 
         return -1;
@@ -427,6 +500,7 @@ int main()
         return -1; 
     }
     glfwMakeContextCurrent(window);
+    glfwSetCharCallback(window, charCallback);
 
     g_fontPlayerName = loadFont("arial.ttf", 10.f, g_dataPlayerName);
     g_fontScoreboard = loadFont("arial.ttf", 20.f, g_dataScoreboard);
@@ -436,8 +510,17 @@ int main()
     g_fontTiny = loadFont("arial.ttf", 14.f, g_dataTiny);
 
     uint32_t inputSeq = 0;
+    float lastTime = (float)glfwGetTime();
+
     while (!glfwWindowShouldClose(window) && g_running) 
     {
+        float currentTime = (float)glfwGetTime();
+        float deltaTime = currentTime - lastTime;
+        lastTime = currentTime;
+
+        if (g_chatTimer > 0.0f)
+            g_chatTimer = g_chatTimer - deltaTime;
+
         bool isFocused = glfwGetWindowAttrib(window, GLFW_FOCUSED) != 0;
 
         int fbW, fbH, winW, winH;
@@ -465,6 +548,45 @@ int main()
         }
         else if (g_appState == AppState::IN_GAME)
         {
+            // chat detection enter
+            bool enterPressed = isFocused && (glfwGetKey(window, GLFW_KEY_ENTER) == GLFW_PRESS);
+            if (enterPressed && !g_enterWasPressed)
+            {
+                if (!g_isTyping)
+                {
+                    g_isTyping = true;
+                    g_currentChatInput = "";
+                }
+                else
+                {
+                    if (!g_currentChatInput.empty())
+                    {
+                        uint16_t msgLen = (uint16_t)g_currentChatInput.length();
+                        uint16_t msgLenNet = htons(msgLen);
+
+                        std::vector<char> chatPkt;
+                        chatPkt.push_back(REQ_CHAT);
+                        chatPkt.insert(chatPkt.end(), reinterpret_cast<char*>(&msgLenNet), reinterpret_cast<char*>(&msgLenNet) + 2);
+                        chatPkt.insert(chatPkt.end(), g_currentChatInput.begin(), g_currentChatInput.end());
+
+                        sendAll(g_tcpSocket, chatPkt.data(), (int)chatPkt.size());
+                    }
+                    g_isTyping = false;
+                }
+            }
+            g_enterWasPressed = enterPressed;
+
+            if (g_isTyping)
+            {
+                bool backspacePressed = isFocused && (glfwGetKey(window, GLFW_KEY_BACKSPACE) == GLFW_PRESS);
+                if (backspacePressed && !g_backspaceWasPressed)
+                {
+                    if (!g_currentChatInput.empty())
+                        g_currentChatInput.pop_back();
+                }
+                g_backspaceWasPressed = backspacePressed;
+            }
+
             // pause menu detection esc
             bool escPressed = isFocused && (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS);
             if (escPressed && !g_escWasPressed)
@@ -557,20 +679,22 @@ int main()
                 }
             }
 
-            // send input data pkt
-            InputPacket inputPkt;
-            inputPkt.sequenceNum = htonl(inputSeq++);
-            inputPkt.playerID = htonl(g_myPlayerID);
+            // send input data pkt if not typing
+            if (!g_isTyping)
+            {
+                InputPacket inputPkt;
+                inputPkt.sequenceNum = htonl(inputSeq++);
+                inputPkt.playerID = htonl(g_myPlayerID);
 
-            inputPkt.w_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS);
-            inputPkt.a_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS);
-            inputPkt.s_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS);
-            inputPkt.d_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS);
-            inputPkt.space_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
-            inputPkt.aimAngle = 0.0f;
+                inputPkt.w_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS);
+                inputPkt.a_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS);
+                inputPkt.s_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS);
+                inputPkt.d_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS);
+                inputPkt.space_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
+                inputPkt.aimAngle = 0.0f;
 
-            sendto(g_udpSocket, reinterpret_cast<const char*>(&inputPkt), sizeof(inputPkt), 0, (sockaddr*)&serverUdpAddr, sizeof(serverUdpAddr));
-
+                sendto(g_udpSocket, reinterpret_cast<const char*>(&inputPkt), sizeof(inputPkt), 0, (sockaddr*)&serverUdpAddr, sizeof(serverUdpAddr));
+            }
             // render
             glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
@@ -661,6 +785,8 @@ int main()
 
             if (g_isTabbed)
                 drawScoreboard(winW, winH);
+
+            drawChat(winW, winH);
         }
         mouseWasPressed = mousePressed;
 
@@ -673,6 +799,7 @@ int main()
     closesocket(g_tcpSocket);
     closesocket(g_udpSocket);
     tUDP.join();
+    tTCP.join();
     glfwTerminate();
     WSACleanup();
     delete g_audio;

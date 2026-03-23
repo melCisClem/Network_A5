@@ -12,6 +12,7 @@
 
 #define REQ_TOGGLE_READY (unsigned char)0x09
 #define REQ_CHEAT_WIN    (unsigned char)0x0A
+#define REQ_CHAT         (unsigned char)0x0B
 
 GLuint g_fontScoreboardTitle, g_fontScoreboard;
 stbtt_bakedchar g_dataScoreboardTitle[96], g_dataScoreboard[96];
