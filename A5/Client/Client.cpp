@@ -629,7 +629,7 @@ int main()
 
             static bool PWasPressed = false;
             bool PPressed = isFocused && (glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS);
-            if (PPressed && !PWasPressed)
+            if (!g_isTyping && PPressed && !PWasPressed)
             {
                 char req = REQ_CHEAT_WIN;
                 sendAll(g_tcpSocket, &req, 1);
