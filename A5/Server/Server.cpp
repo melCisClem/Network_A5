@@ -298,6 +298,13 @@ void serverGameLoop()
                 }
             }
 
+            if (activePlayers == 0 && g_matchState != 0)
+            {
+                g_matchState = 0;
+                g_winnerID = -1;
+                std::cout << "[Server] No players active. Resetting to Waiting Room.\n";
+            }
+
             if (g_matchState == 0) // waiting room
             {
                 if (activePlayers > 0 && activePlayers == readyPlayers) 
@@ -675,6 +682,7 @@ int main()
 
                             g_players[assignedID].hp = MAX_HP;
                             g_players[assignedID].kills = 0;
+                            g_players[assignedID].isReady = false;
                             g_players[assignedID].up = g_players[assignedID].down = g_players[assignedID].left = g_players[assignedID].right = g_players[assignedID].space = false;
                         }
                     }
@@ -770,9 +778,9 @@ int main()
                                 SaveDB();
 
                                 g_players[assignedID].connected = false;
+                                g_players[assignedID].isReady = false;
                                 g_players[assignedID].tcpSocket = INVALID_SOCKET;
-                                g_players[assignedID].x = 10.0f;
-                                g_players[assignedID].y = 10.0f;
+                                ResetPlayerSpawn(assignedID);
                             }
                             closesocket(clientSocket);
                         });

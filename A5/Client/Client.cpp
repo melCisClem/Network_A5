@@ -89,6 +89,9 @@ static bool recvAll(SOCKET s, void* buf, int len)
 }
 
 std::atomic<bool> g_isTyping{ false };
+std::atomic<bool> g_isConnected{ false };
+std::thread g_tUDP;
+std::thread g_tTCP;
 std::string g_currentChatInput = "";
 std::vector<std::string> g_chatMessages;
 std::mutex g_chatMtx;
@@ -107,7 +110,7 @@ void charCallback(GLFWwindow* window, unsigned int codepoint)
 void tcpReceiverThread()
 {
     char cmdBuf[1];
-    while (g_running)
+    while (g_running && g_isConnected)
     {
         if (recv(g_tcpSocket, cmdBuf, 1, 0) > 0)
         {
@@ -132,7 +135,11 @@ void tcpReceiverThread()
         }
         else
         {
-            g_running = false;
+            // If we are still supposed to be connected, but recv failed, server closed connection
+            if (g_isConnected) {
+                g_isConnected = false;
+                g_appState = AppState::MAIN_MENU;
+            }
             break;
         }
     }
@@ -160,6 +167,46 @@ void drawChat(int winW, int winH)
     }
 }
 
+void DisconnectFromServer()
+{
+    if (!g_isConnected) return;
+    g_isConnected = false;
+
+    // Shutdown and close sockets to unblock recv calls
+    if (g_tcpSocket != INVALID_SOCKET) {
+        shutdown(g_tcpSocket, SD_BOTH);
+        closesocket(g_tcpSocket);
+        g_tcpSocket = INVALID_SOCKET;
+    }
+    if (g_udpSocket != INVALID_SOCKET) {
+        closesocket(g_udpSocket);
+        g_udpSocket = INVALID_SOCKET;
+    }
+
+    // Join threads
+    if (g_tTCP.joinable()) g_tTCP.join();
+    if (g_tUDP.joinable()) g_tUDP.join();
+
+    // Reset game state
+    {
+        std::lock_guard<std::mutex> lock(g_stateMtx);
+        g_renderPlayers.clear();
+        g_renderProjectiles.clear();
+        g_lastSeq = 0;
+        g_matchState = 0;
+        g_winnerID = -1;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_chatMtx);
+        g_chatMessages.clear();
+    }
+    g_isPaused = false;
+    g_isTabbed = false;
+    g_isTyping = false;
+
+    std::cout << "[Client] Disconnected from server.\n";
+}
+
 void udpReceiverThread() 
 {
     std::vector<char> buf(UDPPACKET_BUFFER_SIZE);
@@ -167,12 +214,12 @@ void udpReceiverThread()
     int fromLen = sizeof(from);
     bool isFirstPacket = true;
 
-    while (g_running) 
+    while (g_running && g_isConnected) 
     {
         fromLen = sizeof(from);
         int r = recvfrom(g_udpSocket, buf.data(), (int)buf.size(), 0, (sockaddr*)&from, &fromLen);
 
-        if (r >= sizeof(GameStateHeader)) 
+        if (r > 0 && r >= sizeof(GameStateHeader)) 
         {
             auto* header = reinterpret_cast<GameStateHeader*>(buf.data());
             uint32_t seq = ntohl(header->sequenceNum);
@@ -190,6 +237,7 @@ void udpReceiverThread()
                 g_appState = AppState::MAIN_MENU;
                 g_isPaused = false;
                 g_isTabbed = false;
+                DisconnectFromServer();
             }
 
             int expectedSize = sizeof(GameStateHeader) + (numPlayers * sizeof(PlayerState)) + (numProjs * sizeof(ProjectileState));
@@ -248,6 +296,95 @@ void udpReceiverThread()
             }
         }
     }
+}
+
+bool ConnectToServer(const std::string& serverIPStr)
+{
+    if (g_isConnected) DisconnectFromServer();
+
+    std::string tcpPortStr = "27015";
+    uint16_t serverUDPPort = 27015;
+
+    // TCP for establishing link
+    addrinfo tcpHints{}, * tcpInfo = nullptr;
+    tcpHints.ai_family = AF_INET;
+    tcpHints.ai_socktype = SOCK_STREAM;
+    tcpHints.ai_protocol = IPPROTO_TCP;
+    tcpHints.ai_flags = AI_PASSIVE;
+    if (getaddrinfo(serverIPStr.c_str(), tcpPortStr.c_str(), &tcpHints, &tcpInfo) != 0) return false;
+
+    g_tcpSocket = socket(tcpHints.ai_family, tcpHints.ai_socktype, tcpHints.ai_protocol);
+    int errorCode = connect(g_tcpSocket, tcpInfo->ai_addr, (int)tcpInfo->ai_addrlen);
+    freeaddrinfo(tcpInfo);
+
+    if (SOCKET_ERROR == errorCode)
+    {
+        std::cerr << "Failed to connect to server TCP.\n";
+        closesocket(g_tcpSocket);
+        g_tcpSocket = INVALID_SOCKET;
+        return false;
+    }
+
+    // UDP
+    g_udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_in udpBind{};
+    udpBind.sin_family = AF_INET;
+    udpBind.sin_addr.s_addr = INADDR_ANY;
+    udpBind.sin_port = 0; // auto
+    errorCode = bind(g_udpSocket, (sockaddr*)&udpBind, sizeof(udpBind));
+    if (errorCode != NO_ERROR)
+    {
+        std::cerr << "bind() UDP failed: " << WSAGetLastError() << std::endl;
+        closesocket(g_tcpSocket); g_tcpSocket = INVALID_SOCKET;
+        closesocket(g_udpSocket); g_udpSocket = INVALID_SOCKET;
+        return false;
+    }
+
+    // find out which port auto gave
+    sockaddr_in localAddr{};
+    int localLen = sizeof(localAddr);
+    getsockname(g_udpSocket, (sockaddr*)&localAddr, &localLen);
+    uint16_t myUDPPort = localAddr.sin_port;
+
+    // setup server UDP info and connect() it for better NAT traversal
+    sockaddr_in serverUdpAddr{};
+    serverUdpAddr.sin_family = AF_INET;
+    inet_pton(AF_INET, serverIPStr.c_str(), &serverUdpAddr.sin_addr);
+    serverUdpAddr.sin_port = htons(serverUDPPort);
+    connect(g_udpSocket, (sockaddr*)&serverUdpAddr, sizeof(serverUdpAddr));
+
+    std::vector<char> msg;
+    msg.push_back(REQ_JOIN);
+
+    char nameBuf[16] = { 0 };
+    strncpy_s(nameBuf, g_playerName.c_str(), 15);
+    msg.insert(msg.end(), nameBuf, nameBuf + 16);
+
+    uint32_t zeroIp = 0;
+    msg.insert(msg.end(), reinterpret_cast<char*>(&zeroIp), reinterpret_cast<char*>(&zeroIp) + 4);
+    msg.insert(msg.end(), reinterpret_cast<char*>(&myUDPPort), reinterpret_cast<char*>(&myUDPPort) + 2);
+    sendAll(g_tcpSocket, msg.data(), (int)msg.size());
+
+    // wait for response from server
+    JoinResponse jr;
+    if (!recvAll(g_tcpSocket, &jr, sizeof(jr)) || (int32_t)ntohl(jr.playerID) == -1) 
+    {
+        std::cerr << "Server is full or rejected connection.\n";
+        closesocket(g_tcpSocket); g_tcpSocket = INVALID_SOCKET;
+        closesocket(g_udpSocket); g_udpSocket = INVALID_SOCKET;
+        return false;
+    }
+    g_myPlayerID = ntohl(jr.playerID);
+    g_totalKills = ntohl(jr.totalKills);
+    g_hasUpgradedGun = jr.hasUpgradedGun;
+
+    std::cout << "[Client] Connected as Player " << g_myPlayerID << " | Kills: " << g_totalKills << "\n";
+    
+    g_isConnected = true;
+    g_tUDP = std::thread(udpReceiverThread);
+    g_tTCP = std::thread(tcpReceiverThread);
+
+    return true;
 }
 
 void drawWaitingRoom(int winW, int winH, float mouseX, float mouseY, bool mousePressed, bool& mouseWasPressed)
@@ -475,91 +612,8 @@ int main()
     if (!nameInput.empty())
         g_playerName = nameInput;
 
-    std::string tcpPortStr = "27015";
-    uint16_t serverUDPPort = 27015;
-
-    // TCP for establishing link
-    addrinfo tcpHints{}, * tcpInfo = nullptr;
-    tcpHints.ai_family = AF_INET;
-    tcpHints.ai_socktype = SOCK_STREAM;
-    tcpHints.ai_protocol = IPPROTO_TCP;
-    tcpHints.ai_flags = AI_PASSIVE;
-    getaddrinfo(serverIPStr.c_str(), tcpPortStr.c_str(), &tcpHints, &tcpInfo);
-
-#ifdef _DEBUG
-    std::cout << "[Client] Attempting to connect to " << serverIPStr << "..." << std::endl;
-#endif
-    g_tcpSocket = socket(tcpHints.ai_family, tcpHints.ai_socktype, tcpHints.ai_protocol);
-    errorCode = connect(g_tcpSocket, tcpInfo->ai_addr, (int)tcpInfo->ai_addrlen);
-    if (SOCKET_ERROR == errorCode)
-    {
-        std::cerr << "Failed to connect to server TCP.\n";
-        closesocket(g_tcpSocket);
-        WSACleanup();
-        return RETURN_CODE_3;
-    }
-    freeaddrinfo(tcpInfo);
-    std::cout << "[Client] Successfully connected to server " << serverIPStr << std::endl;
-
-    // UDP
-    g_udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    sockaddr_in udpBind{};
-    udpBind.sin_family = AF_INET;
-    udpBind.sin_addr.s_addr = INADDR_ANY;
-    udpBind.sin_port = 0; // auto
-    errorCode = bind(g_udpSocket, (sockaddr*)&udpBind, sizeof(udpBind));
-    if (errorCode != NO_ERROR)
-    {
-        std::cerr << "bind() UDP failed: " << WSAGetLastError() << std::endl;
-        closesocket(g_tcpSocket);
-        closesocket(g_udpSocket);
-        WSACleanup();
-        return RETURN_CODE_2;
-    }
-
-    // find out which port auto gave
-    sockaddr_in localAddr{};
-    int localLen = sizeof(localAddr);
-    getsockname(g_udpSocket, (sockaddr*)&localAddr, &localLen);
-    uint16_t myUDPPort = localAddr.sin_port;
-
-    // setup server UDP info and connect() it for better NAT traversal
-    sockaddr_in serverUdpAddr{};
-    serverUdpAddr.sin_family = AF_INET;
-    inet_pton(AF_INET, serverIPStr.c_str(), &serverUdpAddr.sin_addr);
-    serverUdpAddr.sin_port = htons(serverUDPPort);
-    connect(g_udpSocket, (sockaddr*)&serverUdpAddr, sizeof(serverUdpAddr));
-
-    std::vector<char> msg;
-    msg.push_back(REQ_JOIN);
-
-    char nameBuf[16] = { 0 };
-    strncpy_s(nameBuf, g_playerName.c_str(), 15);
-    msg.insert(msg.end(), nameBuf, nameBuf + 16);
-
-    uint32_t zeroIp = 0;
-    msg.insert(msg.end(), reinterpret_cast<char*>(&zeroIp), reinterpret_cast<char*>(&zeroIp) + 4);
-    msg.insert(msg.end(), reinterpret_cast<char*>(&myUDPPort), reinterpret_cast<char*>(&myUDPPort) + 2);
-    sendAll(g_tcpSocket, msg.data(), (int)msg.size());
-
-    // wait for response from server
-    JoinResponse jr;
-    if (!recvAll(g_tcpSocket, &jr, sizeof(jr)) || (int32_t)ntohl(jr.playerID) == -1) 
-    {
-        std::cerr << "Server is full or rejected connection.\n";
-        return 1;
-    }
-    g_myPlayerID = ntohl(jr.playerID);
-    g_totalKills = ntohl(jr.totalKills);
-    g_hasUpgradedGun = jr.hasUpgradedGun;
-
-    std::cout << "[Client] Joined as Player " << g_myPlayerID << " | Kills: " << g_totalKills << " | Gun Upgraded: " << (g_hasUpgradedGun ? "Yes" : "No") << "\n";
-
     g_audio = new AudioManager();
     g_audio->PlayBGM(ingame_BGM_audio);
-
-    std::thread tUDP(udpReceiverThread);
-    std::thread tTCP(tcpReceiverThread);
 
     if (!glfwInit()) 
         return -1;
@@ -610,6 +664,7 @@ int main()
 
         if (g_appState == AppState::MAIN_MENU)
         {
+            if (g_isConnected) DisconnectFromServer();
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
             drawMainMenu(winW, winH, mouseX, mouseY, mousePressed, mouseWasPressed);
         }
@@ -620,260 +675,277 @@ int main()
         }
         else if (g_appState == AppState::WAITING_ROOM)
         {
+            if (!g_isConnected) {
+                if (!ConnectToServer(serverIPStr)) {
+                    g_appState = AppState::MAIN_MENU;
+                }
+            }
+
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
             drawWaitingRoom(winW, winH, mouseX, mouseY, mousePressed, mouseWasPressed);
 
             // send heartbeat
-            InputPacket heartbeatPkt;
-            heartbeatPkt.sequenceNum = htonl(inputSeq++);
-            heartbeatPkt.playerID = htonl(g_myPlayerID);
-            heartbeatPkt.w_pressed = heartbeatPkt.a_pressed = heartbeatPkt.s_pressed = heartbeatPkt.d_pressed = heartbeatPkt.space_pressed = false;
-            heartbeatPkt.aimAngle = 0.0f;
-            heartbeatPkt.hasUpgradedGun = g_hasUpgradedGun;
-            send(g_udpSocket, reinterpret_cast<const char*>(&heartbeatPkt), sizeof(heartbeatPkt), 0);
+            if (g_isConnected) {
+                InputPacket heartbeatPkt;
+                heartbeatPkt.sequenceNum = htonl(inputSeq++);
+                heartbeatPkt.playerID = htonl(g_myPlayerID);
+                heartbeatPkt.w_pressed = heartbeatPkt.a_pressed = heartbeatPkt.s_pressed = heartbeatPkt.d_pressed = heartbeatPkt.space_pressed = false;
+                heartbeatPkt.aimAngle = 0.0f;
+                heartbeatPkt.hasUpgradedGun = g_hasUpgradedGun;
+                send(g_udpSocket, reinterpret_cast<const char*>(&heartbeatPkt), sizeof(heartbeatPkt), 0);
+            }
         }
         else if (g_appState == AppState::IN_GAME)
         {
-            // chat detection enter
-            bool enterPressed = isFocused && (glfwGetKey(window, GLFW_KEY_ENTER) == GLFW_PRESS);
-            if (enterPressed && !g_enterWasPressed)
-            {
+            if (!g_isConnected) {
+                g_appState = AppState::MAIN_MENU;
+            }
+            else {
+                // chat detection enter
+                bool enterPressed = isFocused && (glfwGetKey(window, GLFW_KEY_ENTER) == GLFW_PRESS);
+                if (enterPressed && !g_enterWasPressed)
+                {
+                    if (!g_isTyping)
+                    {
+                        g_isTyping = true;
+                        g_currentChatInput = "";
+                    }
+                    else
+                    {
+                        if (!g_currentChatInput.empty())
+                        {
+                            uint16_t msgLen = (uint16_t)g_currentChatInput.length();
+                            uint16_t msgLenNet = htons(msgLen);
+
+                            std::vector<char> chatPkt;
+                            chatPkt.push_back(REQ_CHAT);
+                            chatPkt.insert(chatPkt.end(), reinterpret_cast<char*>(&msgLenNet), reinterpret_cast<char*>(&msgLenNet) + 2);
+                            chatPkt.insert(chatPkt.end(), g_currentChatInput.begin(), g_currentChatInput.end());
+
+                            sendAll(g_tcpSocket, chatPkt.data(), (int)chatPkt.size());
+                        }
+                        g_isTyping = false;
+                    }
+                }
+                g_enterWasPressed = enterPressed;
+
+                if (g_isTyping)
+                {
+                    bool backspacePressed = isFocused && (glfwGetKey(window, GLFW_KEY_BACKSPACE) == GLFW_PRESS);
+                    if (backspacePressed && !g_backspaceWasPressed)
+                    {
+                        if (!g_currentChatInput.empty())
+                            g_currentChatInput.pop_back();
+                    }
+                    g_backspaceWasPressed = backspacePressed;
+                }
+
+                // pause menu detection esc
+                bool escPressed = isFocused && (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS);
+                if (escPressed && !g_escWasPressed)
+                {
+                    if (g_isTabbed)
+                    {
+                        g_isTabbed = false;
+                        g_isPaused = true;
+                    }
+                    else
+                        g_isPaused = !g_isPaused;
+                }
+                g_escWasPressed = escPressed;
+
+                // scoreboard detection tab
+                bool tabPressed = isFocused && (glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS);
+                if (tabPressed && !g_tabWasPressed)
+                {
+                    if (g_isPaused)
+                    {
+                        g_isPaused = false;
+                        g_isTabbed = true;
+                    }
+                    else
+                        g_isTabbed = !g_isTabbed;
+                }
+                g_tabWasPressed = tabPressed;
+
+                static bool PWasPressed = false;
+                bool PPressed = isFocused && (glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS);
+                if (!g_isTyping && PPressed && !PWasPressed)
+                {
+                    char req = REQ_CHEAT_WIN;
+                    sendAll(g_tcpSocket, &req, 1);
+                }
+                PWasPressed = PPressed;
+
+                // hide cursor in game show in pause menu
+                if (g_isPaused || g_isTabbed)
+                    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+                else
+                    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+
+                // Pause Menu Interactions Volume n Quit
+                if (g_isPaused && isFocused)
+                {
+                    if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS)
+                    {
+                        g_currentVolume += 0.01f;
+                        if (g_currentVolume > 1.0f) g_currentVolume = 1.0f;
+                        if (g_audio) g_audio->SetMasterVolume(g_currentVolume);
+                    }
+                    if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS)
+                    {
+                        g_currentVolume -= 0.01f;
+                        if (g_currentVolume < 0.0f) g_currentVolume = 0.0f;
+                        if (g_audio) g_audio->SetMasterVolume(g_currentVolume);
+                    }
+
+                    if (mousePressed) {
+                        using namespace UI;
+                        barY = -0.1f; gap = 0.08f; barHalfWidth = 0.4f;
+                        double buttonRadius_sq = buttonRadius * buttonRadius;
+
+                        // check for vol control
+                        float volumeChange = 0.001f;
+                        double distMinus_sq = pow(mouseX - (-barHalfWidth - gap), 2) + pow(mouseY - barY, 2);
+                        if (distMinus_sq <= buttonRadius_sq)
+                        {
+                            g_currentVolume = fmaxf(0.0f, g_currentVolume - volumeChange);
+                            if (g_audio)
+                                g_audio->SetMasterVolume(g_currentVolume);
+                        }
+                        double distPlus_sq = pow(mouseX - (barHalfWidth + gap), 2) + pow(mouseY - barY, 2);
+                        if (distPlus_sq <= buttonRadius_sq)
+                        {
+                            g_currentVolume = fminf(1.0f, g_currentVolume + volumeChange);
+                            if (g_audio)
+                                g_audio->SetMasterVolume(g_currentVolume);
+                        }
+
+                        // check for quit button to go back to main menu
+                        if (!mouseWasPressed)
+                        {
+                            quitY = -0.4f;
+                            quitSize = 0.06f;
+                            if (mouseX >= -quitSize && mouseX <= quitSize && mouseY >= quitY - quitSize && mouseY <= quitY + quitSize)
+                            {
+                                g_appState = AppState::MAIN_MENU;
+                                g_isPaused = false;
+                                DisconnectFromServer();
+                            }
+                        }
+                    }
+                }
+
+                // send input data pkt if not typing
                 if (!g_isTyping)
                 {
-                    g_isTyping = true;
-                    g_currentChatInput = "";
+                    InputPacket inputPkt;
+                    inputPkt.sequenceNum = htonl(inputSeq++);
+                    inputPkt.playerID = htonl(g_myPlayerID);
+
+                    inputPkt.w_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS);
+                    inputPkt.a_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS);
+                    inputPkt.s_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS);
+                    inputPkt.d_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS);
+                    inputPkt.space_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
+                    inputPkt.aimAngle = 0.0f;
+                    inputPkt.hasUpgradedGun = g_hasUpgradedGun;
+
+                    send(g_udpSocket, reinterpret_cast<const char*>(&inputPkt), sizeof(inputPkt), 0);
                 }
-                else
+                // render
+                glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+
+                drawMap();
+
+                std::map<uint32_t, ClientPlayer> playersToDraw;
+                std::vector<ProjectileState> projsToDraw;
                 {
-                    if (!g_currentChatInput.empty())
+                    std::lock_guard<std::mutex> lock(g_stateMtx);
+                    playersToDraw = g_renderPlayers;
+                    projsToDraw = g_renderProjectiles;
+                }
+
+                // draw tanks
+                for (const auto& pair : playersToDraw)
+                {
+                    uint32_t id = pair.first;
+                    float px = pair.second.x;
+                    float py = pair.second.y;
+                    float pAngle = pair.second.aimAngle;
+                    int pHP = pair.second.hp;
+                    int pShootCD = pair.second.shootCooldown;
+
+                    float r = 0.2f, g = 0.2f, b = 0.2f;
+                    if (id % 4 == 0) r = 0.8f;                      // Player 0: Red
+                    else if (id % 4 == 1) g = 0.8f;                 // Player 1: Green
+                    else if (id % 4 == 2) b = 0.8f;                 // Player 2: Blue
+                    else if (id % 4 == 3) { r = 0.8f; g = 0.8f; }   // Player 3: Yellow
+
+                    bool isMe = (id == g_myPlayerID);
+                    drawTank(px, py, r, g, b, pAngle, pHP, pShootCD, isMe, pair.second.hasUpgradedGun);
+                }
+
+                // draw proj
+                for (const auto& proj : projsToDraw)
+                    drawProjectile(proj.x, proj.y, proj.isUpgraded != 0);
+
+                // draw floating name
+                for (const auto& pair : playersToDraw)
+                {
+                    uint32_t id = pair.first;
+                    std::string playerName = pair.second.name;
+                    float px = pair.second.x;
+                    float py = pair.second.y;
+
+                    int winW, winH;
+                    glfwGetWindowSize(window, &winW, &winH);
+                    float screenX = (px + 1.0f) * 0.5f * winW;
+                    float screenY = (1.0f - (py + 1.0f) * 0.5f) * winH;
+
+                    drawTextScreen(screenX - 15, screenY - 25, playerName, 1.0f, 1.0f, 1.0f, g_fontPlayerName, g_dataPlayerName);
+                }
+
+                // game over 
+                if (g_matchState == 2 && g_winnerID != -1)
+                {
+                    glEnable(GL_BLEND);
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                    glColor4f(0.0f, 0.0f, 0.0f, 0.85f);
+                    glBegin(GL_QUADS);
+                    glVertex2f(-1.0f, -1.0f); glVertex2f(1.0f, -1.0f);
+                    glVertex2f(1.0f, 1.0f); glVertex2f(-1.0f, 1.0f);
+                    glEnd();
+                    glDisable(GL_BLEND);
+
+                    std::string winText;
+                    if (g_winnerID == g_myPlayerID) 
                     {
-                        uint16_t msgLen = (uint16_t)g_currentChatInput.length();
-                        uint16_t msgLenNet = htons(msgLen);
-
-                        std::vector<char> chatPkt;
-                        chatPkt.push_back(REQ_CHAT);
-                        chatPkt.insert(chatPkt.end(), reinterpret_cast<char*>(&msgLenNet), reinterpret_cast<char*>(&msgLenNet) + 2);
-                        chatPkt.insert(chatPkt.end(), g_currentChatInput.begin(), g_currentChatInput.end());
-
-                        sendAll(g_tcpSocket, chatPkt.data(), (int)chatPkt.size());
+                        winText = "VICTORY!";
+                        drawTextScreen((winW * 0.5f) - 198.f, winH * 0.5f, winText, 0.2f, 1.0f, 0.2f, g_fontMainMenuLarge, g_dataMainMenuLarge);
                     }
-                    g_isTyping = false;
-                }
-            }
-            g_enterWasPressed = enterPressed;
+                    else 
+                    {
+                        std::string winnerName = "Player";
+                        if (playersToDraw.count(g_winnerID)) winnerName = playersToDraw[g_winnerID].name;
 
-            if (g_isTyping)
-            {
-                bool backspacePressed = isFocused && (glfwGetKey(window, GLFW_KEY_BACKSPACE) == GLFW_PRESS);
-                if (backspacePressed && !g_backspaceWasPressed)
-                {
-                    if (!g_currentChatInput.empty())
-                        g_currentChatInput.pop_back();
+                        winText = winnerName + " WON!";
+                        drawTextScreen((winW * 0.5f) - 198.f, winH * 0.5f, winText, 1.0f, 0.8f, 0.0f, g_fontMainMenuLarge, g_dataMainMenuLarge);
+                    }
+                    drawTextScreen((winW * 0.5f) - 190.0f, (winH * 0.5f) + 80.0f, "Returning to Main Menu...", 0.6f, 0.6f, 0.6f, g_fontTiny, g_dataTiny);
                 }
-                g_backspaceWasPressed = backspacePressed;
-            }
 
-            // pause menu detection esc
-            bool escPressed = isFocused && (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS);
-            if (escPressed && !g_escWasPressed)
-            {
-                if (g_isTabbed)
-                {
-                    g_isTabbed = false;
-                    g_isPaused = true;
-                }
-                else
-                    g_isPaused = !g_isPaused;
-            }
-            g_escWasPressed = escPressed;
+                // (Keep your g_isPaused and g_isTabbed checks down here!)
 
-            // scoreboard detection tab
-            bool tabPressed = isFocused && (glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS);
-            if (tabPressed && !g_tabWasPressed)
-            {
                 if (g_isPaused)
-                {
-                    g_isPaused = false;
-                    g_isTabbed = true;
-                }
-                else
-                    g_isTabbed = !g_isTabbed;
+                    drawPauseMenu(g_currentVolume);
+
+                if (g_isTabbed)
+                    drawScoreboard(winW, winH);
+
+                drawChat(winW, winH);
             }
-            g_tabWasPressed = tabPressed;
-
-            static bool PWasPressed = false;
-            bool PPressed = isFocused && (glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS);
-            if (!g_isTyping && PPressed && !PWasPressed)
-            {
-                char req = REQ_CHEAT_WIN;
-                sendAll(g_tcpSocket, &req, 1);
-            }
-            PWasPressed = PPressed;
-
-            // hide cursor in game show in pause menu
-            if (g_isPaused || g_isTabbed)
-                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-            else
-                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
-
-            // Pause Menu Interactions Volume n Quit
-            if (g_isPaused && isFocused)
-            {
-                if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS)
-                {
-                    g_currentVolume += 0.01f;
-                    if (g_currentVolume > 1.0f) g_currentVolume = 1.0f;
-                    if (g_audio) g_audio->SetMasterVolume(g_currentVolume);
-                }
-                if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS)
-                {
-                    g_currentVolume -= 0.01f;
-                    if (g_currentVolume < 0.0f) g_currentVolume = 0.0f;
-                    if (g_audio) g_audio->SetMasterVolume(g_currentVolume);
-                }
-
-                if (mousePressed) {
-                    using namespace UI;
-                    barY = -0.1f; gap = 0.08f; barHalfWidth = 0.4f;
-                    double buttonRadius_sq = buttonRadius * buttonRadius;
-
-                    // check for vol control
-                    float volumeChange = 0.001f;
-                    double distMinus_sq = pow(mouseX - (-barHalfWidth - gap), 2) + pow(mouseY - barY, 2);
-                    if (distMinus_sq <= buttonRadius_sq)
-                    {
-                        g_currentVolume = fmaxf(0.0f, g_currentVolume - volumeChange);
-                        if (g_audio)
-                            g_audio->SetMasterVolume(g_currentVolume);
-                    }
-                    double distPlus_sq = pow(mouseX - (barHalfWidth + gap), 2) + pow(mouseY - barY, 2);
-                    if (distPlus_sq <= buttonRadius_sq)
-                    {
-                        g_currentVolume = fminf(1.0f, g_currentVolume + volumeChange);
-                        if (g_audio)
-                            g_audio->SetMasterVolume(g_currentVolume);
-                    }
-
-                    // check for quit button to go back to main menu
-                    if (!mouseWasPressed)
-                    {
-                        quitY = -0.4f;
-                        quitSize = 0.06f;
-                        if (mouseX >= -quitSize && mouseX <= quitSize && mouseY >= quitY - quitSize && mouseY <= quitY + quitSize)
-                            AppState::MAIN_MENU;
-                    }
-                }
-            }
-
-            // send input data pkt if not typing
-            if (!g_isTyping)
-            {
-                InputPacket inputPkt;
-                inputPkt.sequenceNum = htonl(inputSeq++);
-                inputPkt.playerID = htonl(g_myPlayerID);
-
-                inputPkt.w_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS);
-                inputPkt.a_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS);
-                inputPkt.s_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS);
-                inputPkt.d_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS);
-                inputPkt.space_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
-                inputPkt.aimAngle = 0.0f;
-                inputPkt.hasUpgradedGun = g_hasUpgradedGun;
-
-                send(g_udpSocket, reinterpret_cast<const char*>(&inputPkt), sizeof(inputPkt), 0);
-            }
-            // render
-            glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
-            glClear(GL_COLOR_BUFFER_BIT);
-
-            drawMap();
-
-            std::map<uint32_t, ClientPlayer> playersToDraw;
-            std::vector<ProjectileState> projsToDraw;
-            {
-                std::lock_guard<std::mutex> lock(g_stateMtx);
-                playersToDraw = g_renderPlayers;
-                projsToDraw = g_renderProjectiles;
-            }
-
-            // draw tanks
-            for (const auto& pair : playersToDraw)
-            {
-                uint32_t id = pair.first;
-                float px = pair.second.x;
-                float py = pair.second.y;
-                float pAngle = pair.second.aimAngle;
-                int pHP = pair.second.hp;
-                int pShootCD = pair.second.shootCooldown;
-
-                float r = 0.2f, g = 0.2f, b = 0.2f;
-                if (id % 4 == 0) r = 0.8f;                      // Player 0: Red
-                else if (id % 4 == 1) g = 0.8f;                 // Player 1: Green
-                else if (id % 4 == 2) b = 0.8f;                 // Player 2: Blue
-                else if (id % 4 == 3) { r = 0.8f; g = 0.8f; }   // Player 3: Yellow
-
-                bool isMe = (id == g_myPlayerID);
-                drawTank(px, py, r, g, b, pAngle, pHP, pShootCD, isMe, pair.second.hasUpgradedGun);
-            }
-
-            // draw proj
-            for (const auto& proj : projsToDraw)
-                drawProjectile(proj.x, proj.y, proj.isUpgraded != 0);
-
-            // draw floating name
-            for (const auto& pair : playersToDraw)
-            {
-                uint32_t id = pair.first;
-                std::string playerName = pair.second.name;
-                float px = pair.second.x;
-                float py = pair.second.y;
-
-                int winW, winH;
-                glfwGetWindowSize(window, &winW, &winH);
-                float screenX = (px + 1.0f) * 0.5f * winW;
-                float screenY = (1.0f - (py + 1.0f) * 0.5f) * winH;
-
-                drawTextScreen(screenX - 15, screenY - 25, playerName, 1.0f, 1.0f, 1.0f, g_fontPlayerName, g_dataPlayerName);
-            }
-
-            // game over 
-            if (g_matchState == 2 && g_winnerID != -1)
-            {
-                glEnable(GL_BLEND);
-                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-                glColor4f(0.0f, 0.0f, 0.0f, 0.85f);
-                glBegin(GL_QUADS);
-                glVertex2f(-1.0f, -1.0f); glVertex2f(1.0f, -1.0f);
-                glVertex2f(1.0f, 1.0f); glVertex2f(-1.0f, 1.0f);
-                glEnd();
-                glDisable(GL_BLEND);
-
-                std::string winText;
-                if (g_winnerID == g_myPlayerID) 
-                {
-                    winText = "VICTORY!";
-                    drawTextScreen((winW * 0.5f) - 198.f, winH * 0.5f, winText, 0.2f, 1.0f, 0.2f, g_fontMainMenuLarge, g_dataMainMenuLarge);
-                }
-                else 
-                {
-                    std::string winnerName = "Player";
-                    if (playersToDraw.count(g_winnerID)) winnerName = playersToDraw[g_winnerID].name;
-
-                    winText = winnerName + " WON!";
-                    drawTextScreen((winW * 0.5f) - 198.f, winH * 0.5f, winText, 1.0f, 0.8f, 0.0f, g_fontMainMenuLarge, g_dataMainMenuLarge);
-                }
-                drawTextScreen((winW * 0.5f) - 190.0f, (winH * 0.5f) + 80.0f, "Returning to Main Menu...", 0.6f, 0.6f, 0.6f, g_fontTiny, g_dataTiny);
-            }
-
-            // (Keep your g_isPaused and g_isTabbed checks down here!)
-
-            if (g_isPaused)
-                drawPauseMenu(g_currentVolume);
-
-            if (g_isTabbed)
-                drawScoreboard(winW, winH);
-
-            drawChat(winW, winH);
         }
         mouseWasPressed = mousePressed;
 
@@ -882,11 +954,7 @@ int main()
     }
 
     g_running = false;
-    shutdown(g_tcpSocket, SD_BOTH);
-    closesocket(g_tcpSocket);
-    closesocket(g_udpSocket);
-    tUDP.join();
-    tTCP.join();
+    DisconnectFromServer();
     glfwTerminate();
     WSACleanup();
     delete g_audio;
