@@ -172,6 +172,36 @@ float g_moveSpeed = 0.015f;
 float g_turnSpeed = 3.0f;
 float g_bulletSpeed = 0.05f;
 
+// Reset player position and orientation to their spawn point
+void ResetPlayerSpawn(int id)
+{
+    int spawnMarker = id + 2;
+    bool foundSpawn = false;
+
+    for (int row = 0; row < MAP_HEIGHT; row++)
+    {
+        for (int col = 0; col < MAP_WIDTH; col++)
+        {
+            if (ARENA_MAP[row][col] == spawnMarker)
+            {
+                g_players[id].x = ((col + 0.5f) * 2.0f / MAP_WIDTH) - 1.0f;
+                g_players[id].y = ((row + 0.5f) * 2.0f / MAP_HEIGHT) - 1.0f;
+                g_players[id].aimAngle = atan2(-g_players[id].y, -g_players[id].x) * 180.0f / 3.14159f;
+                foundSpawn = true;
+                break;
+            }
+        }
+        if (foundSpawn) break;
+    }
+
+    if (!foundSpawn)
+    {
+        g_players[id].x = 0.0f;
+        g_players[id].y = 0.0f;
+        g_players[id].aimAngle = 0.0f;
+    }
+}
+
 // Helper to receive all data from a TCP socket
 static bool recvAll(SOCKET s, void* buf, int len) 
 {
@@ -415,6 +445,7 @@ void serverGameLoop()
                         {
                             g_players[i].totalKills += g_players[i].kills;
                             SyncPlayerToDB(i);
+                            ResetPlayerSpawn(i);
                         }
                         g_players[i].isReady = false;
                         g_players[i].kills = 0;
@@ -640,31 +671,7 @@ int main()
                                       << ") joined from " << ipStr << ":" << ntohs(clientPort_net) << std::endl;
 
                             // Handle spawn logic
-                            int spawnMarker = assignedID + 2;
-                            bool foundSpawn = false;
-
-                            for (int row = 0; row < MAP_HEIGHT; row++)
-                            {
-                                for (int col = 0; col < MAP_WIDTH; col++) 
-                                {
-                                    if (ARENA_MAP[row][col] == spawnMarker) 
-                                    {
-                                        g_players[assignedID].x = ((col + 0.5f) * 2.0f / MAP_WIDTH) - 1.0f;
-                                        g_players[assignedID].y = ((row + 0.5f) * 2.0f / MAP_HEIGHT) - 1.0f;
-                                        g_players[assignedID].aimAngle = atan2(-g_players[assignedID].y, -g_players[assignedID].x) * 180.0f / 3.14159f;
-                                        foundSpawn = true;
-                                        break;
-                                    }
-                                }
-                                if (foundSpawn) break;
-                            }
-
-                            if (!foundSpawn) 
-                            {
-                                g_players[assignedID].x = 0.0f;
-                                g_players[assignedID].y = 0.0f;
-                                g_players[assignedID].aimAngle = 0.0f;
-                            }
+                            ResetPlayerSpawn(assignedID);
 
                             g_players[assignedID].hp = MAX_HP;
                             g_players[assignedID].kills = 0;
