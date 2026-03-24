@@ -118,7 +118,7 @@ static bool sendAll(SOCKET s, const void* data, int len)
 // listen for inputs from ALL clients
 void udpReceiverThread() 
 {
-    std::vector<char> buf(sizeof(InputPacket));
+    std::vector<char> buf(UDPPACKET_BUFFER_SIZE);
     sockaddr_in from{};
     int fromLen = sizeof(from);
 
@@ -130,7 +130,7 @@ void udpReceiverThread()
     {
         fromLen = sizeof(from);
         int r = recvfrom(g_serverUDPSocket, buf.data(), (int)buf.size(), 0, (sockaddr*)&from, &fromLen);
-        if (r == sizeof(InputPacket)) 
+        if (r >= (int)sizeof(InputPacket)) 
         {
             auto* pkt = reinterpret_cast<InputPacket*>(buf.data());
 
@@ -140,6 +140,12 @@ void udpReceiverThread()
                 std::lock_guard<std::mutex> lk(g_stateMtx);
                 if (g_players[id].connected) 
                 {
+                    if (g_players[id].udpAddr.sin_port != from.sin_port || g_players[id].udpAddr.sin_addr.s_addr != from.sin_addr.s_addr)
+                    {
+                        char ipStr[INET_ADDRSTRLEN];
+                        inet_ntop(AF_INET, &from.sin_addr, ipStr, INET_ADDRSTRLEN);
+                        std::cout << "[Server] Latching UDP for Player " << id << " to " << ipStr << ":" << ntohs(from.sin_port) << std::endl;
+                    }
                     g_players[id].udpAddr = from; // Store the address we actually received from
                     g_players[id].up = pkt->w_pressed;
                     g_players[id].down = pkt->s_pressed;
@@ -434,7 +440,7 @@ int main()
     }
 
     std::string tcpPortStr = "27015";
-    std::string udpPortStr = "27016";
+    std::string udpPortStr = "27015";
     std::cout << "Listening on TCP Port: " << tcpPortStr << std::endl;
     std::cout << "Listening on UDP Port: " << udpPortStr << std::endl;
 
