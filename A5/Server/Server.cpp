@@ -128,6 +128,7 @@ void udpReceiverThread()
 
     while (g_running) 
     {
+        fromLen = sizeof(from);
         int r = recvfrom(g_serverUDPSocket, buf.data(), (int)buf.size(), 0, (sockaddr*)&from, &fromLen);
         if (r == sizeof(InputPacket)) 
         {
@@ -139,6 +140,7 @@ void udpReceiverThread()
                 std::lock_guard<std::mutex> lk(g_stateMtx);
                 if (g_players[id].connected) 
                 {
+                    g_players[id].udpAddr = from; // Store the address we actually received from
                     g_players[id].up = pkt->w_pressed;
                     g_players[id].down = pkt->s_pressed;
                     g_players[id].left = pkt->a_pressed;

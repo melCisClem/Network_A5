@@ -545,6 +545,14 @@ int main()
         {
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
             drawWaitingRoom(winW, winH, mouseX, mouseY, mousePressed, mouseWasPressed);
+
+            // send heartbeat
+            InputPacket heartbeatPkt;
+            heartbeatPkt.sequenceNum = htonl(inputSeq++);
+            heartbeatPkt.playerID = htonl(g_myPlayerID);
+            heartbeatPkt.w_pressed = heartbeatPkt.a_pressed = heartbeatPkt.s_pressed = heartbeatPkt.d_pressed = heartbeatPkt.space_pressed = false;
+            heartbeatPkt.aimAngle = 0.0f;
+            sendto(g_udpSocket, reinterpret_cast<const char*>(&heartbeatPkt), sizeof(heartbeatPkt), 0, (sockaddr*)&serverUdpAddr, sizeof(serverUdpAddr));
         }
         else if (g_appState == AppState::IN_GAME)
         {
