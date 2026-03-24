@@ -10,10 +10,6 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "../stb_truetype.h"
 
-#define REQ_TOGGLE_READY (unsigned char)0x09
-#define REQ_CHEAT_WIN    (unsigned char)0x0A
-#define REQ_CHAT         (unsigned char)0x0B
-
 GLuint g_fontScoreboardTitle, g_fontScoreboard;
 stbtt_bakedchar g_dataScoreboardTitle[96], g_dataScoreboard[96];
 
@@ -33,11 +29,14 @@ inline SOCKET g_tcpSocket = INVALID_SOCKET;
 enum class AppState {
     MAIN_MENU,
     WAITING_ROOM,
-    IN_GAME
+    IN_GAME,
+    EXP_SCREEN
 };
 AppState g_appState = AppState::MAIN_MENU;
 
 std::string g_playerName = "Player";
+inline int g_totalKills = 0;
+inline bool g_hasUpgradedGun = false;
 inline uint32_t g_myPlayerID = 0;
 inline int32_t g_matchState = 0; 
 inline int32_t g_winnerID = -1;
@@ -52,6 +51,7 @@ struct ClientPlayer {
     int kills;
     int shootCooldown;
     bool isReady;
+    bool hasUpgradedGun;
 };
 std::map<uint32_t, ClientPlayer> g_renderPlayers;
 std::vector<ProjectileState> g_renderProjectiles;
@@ -209,7 +209,7 @@ void drawMap()
 }
 
 // draws tank, hp bar, shot cooldown bar
-void drawTank(float x, float y, float r, float g, float b, float facingAngle, int hp, int cooldown, bool isLocalPlayer)
+void drawTank(float x, float y, float r, float g, float b, float facingAngle, int hp, int cooldown, bool isLocalPlayer, bool hasUpgradedGun)
 {
     float width = tank_width;
     float height = tank_height;
@@ -286,7 +286,9 @@ void drawTank(float x, float y, float r, float g, float b, float facingAngle, in
     glRotatef(facingAngle, 0.0f, 0.0f, 1.0f);
 
     // draw gun barrel
-    glLineWidth(4.0f);
+    static float gunWidth = 4.0f;   
+    float realGunWidth = gunWidth * (hasUpgradedGun ? 2.0f : 1.0f);
+    glLineWidth(realGunWidth);
     glBegin(GL_LINES);
     glColor3f(0.6f, 0.6f, 0.6f);
     glVertex2f(0.0f, 0.0f);
@@ -321,16 +323,17 @@ void drawTank(float x, float y, float r, float g, float b, float facingAngle, in
     glPopMatrix();
 }
 
-void drawProjectile(float x, float y)
+void drawProjectile(float x, float y, bool isUpgraded)
 {
     glPushMatrix();
     glTranslatef(x, y, 0.0f);
     glBegin(GL_POLYGON);
     glColor3f(1.0f, 1.0f, 0.0f); // yellow
+    float radius = isUpgraded ? 0.04f : 0.02f;
     for (int i = 0; i < 360; i += 30)
     {
         float theta = i * 3.14159f / 180.0f;
-        glVertex2f(0.02f * cos(theta), 0.02f * sin(theta));
+        glVertex2f(radius * cos(theta), radius * sin(theta));
     }
     glEnd();
     glPopMatrix();

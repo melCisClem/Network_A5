@@ -218,8 +218,14 @@ void udpReceiverThread()
                         activePlayersThisTick[pID].kills = (int)ntohl(ps->kills);
                         activePlayersThisTick[pID].shootCooldown = (int)ntohl(ps->shootCooldown);
                         activePlayersThisTick[pID].isReady = ps->isReady;
+                        activePlayersThisTick[pID].hasUpgradedGun = ps->hasUpgradedGun;
 
-                        if (g_audio)
+                        if (pID == g_myPlayerID)
+                        {
+                            g_totalKills = (int)ntohl(ps->totalKills);
+                            g_hasUpgradedGun = ps->hasUpgradedGun;
+                        }
+                        if(g_audio)
                         {
                             if (ps->justShot) g_audio->PlaySFX(shooting_audio);
                             if (ps->justHit) g_audio->PlaySFX(explosion_audio);
@@ -354,9 +360,68 @@ void drawMainMenu(int winW, int winH, float mouseX, float mouseY, bool mousePres
             {
                 g_appState = AppState::WAITING_ROOM;
             }
-            if (btn.action == 2) std::cout << "idk bruh rubric wants this nonsense .-.\n";
+            if (btn.action == 2) g_appState = AppState::EXP_SCREEN;
             if (btn.action == 3) g_running = false;
         }
+    }
+}
+
+void drawEXP(int winW, int winH, float mouseX, float mouseY, bool mousePressed, bool& mouseWasPressed)
+{
+    glClearColor(0.15f, 0.15f, 0.2f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    float centerX = winW * 0.5f;
+
+    drawTextScreen(centerX - 130.f, winH * 0.15f, "EXP SCREEN", 1.f, 0.8f, 0.2f, g_fontMainMenuLarge, g_dataMainMenuLarge);
+
+    std::string killsTxt = "Total Kills: " + std::to_string(g_totalKills);
+    drawTextScreen(centerX - 100.f, winH * 0.35f, killsTxt, 1.f, 1.f, 1.f, g_fontMainMenuSmall, g_dataMainMenuSmall);
+
+    // Buy Button
+    float btnY = -0.1f;
+    float btnWidth = 0.45f;
+    float btnHeight = 0.1f;
+    bool isHovered = (mouseX >= -btnWidth && mouseX <= btnWidth && mouseY >= btnY - btnHeight && mouseY <= btnY + btnHeight);
+
+    if (g_hasUpgradedGun) glColor3f(0.2f, 0.6f, 0.2f);
+    else if (isHovered && g_totalKills >= 10) glColor3f(0.5f, 0.5f, 0.1f);
+    else if (isHovered) glColor3f(0.4f, 0.4f, 0.4f);
+    else glColor3f(0.2f, 0.2f, 0.2f);
+
+    glBegin(GL_QUADS);
+    glVertex2f(-btnWidth, btnY - btnHeight);
+    glVertex2f(btnWidth, btnY - btnHeight);
+    glVertex2f(btnWidth, btnY + btnHeight);
+    glVertex2f(-btnWidth, btnY + btnHeight);
+    glEnd();
+
+    std::string btnTxt = g_hasUpgradedGun ? "GUN UPGRADED!" : "UPGRADE GUN (10 KILLS)";
+    float textPixelY = (1.f - (btnY + 1.f) * 0.5f) * winH;
+    drawTextScreen(centerX - 180.f, textPixelY + 20.f, btnTxt, 1.f, 1.f, 1.f, g_fontMainMenuSmall, g_dataMainMenuSmall);
+
+    if (isHovered && mousePressed && !mouseWasPressed && !g_hasUpgradedGun && g_totalKills >= 10)
+    {
+        g_totalKills -= 10;
+        g_hasUpgradedGun = true;
+        unsigned char req = REQ_BUY_UPGRADE;
+        sendAll(g_tcpSocket, &req, 1);
+    }
+
+    // BACK Button
+    float backY = -0.6f;
+    bool backHovered = (mouseX >= -0.2f && mouseX <= 0.2f && mouseY >= backY - 0.08f && mouseY <= backY + 0.08f);
+    glColor3f(backHovered ? 0.4f : 0.2f, backHovered ? 0.4f : 0.2f, backHovered ? 0.4f : 0.2f);
+    glBegin(GL_QUADS);
+    glVertex2f(-0.2f, backY - 0.08f); glVertex2f(0.2f, backY - 0.08f);
+    glVertex2f(0.2f, backY + 0.08f);  glVertex2f(-0.2f, backY + 0.08f);
+    glEnd();
+    float backTextY = (1.f - (backY + 1.f) * 0.5f) * winH;
+    drawTextScreen(centerX - 45.f, backTextY + 15.f, "BACK", 1.f, 1.f, 1.f, g_fontMainMenuSmall, g_dataMainMenuSmall);
+
+    if (backHovered && mousePressed && !mouseWasPressed)
+    {
+        g_appState = AppState::MAIN_MENU;
     }
 }
 
@@ -365,7 +430,7 @@ int main()
     WSADATA wsaData;
     SecureZeroMemory(&wsaData, sizeof(wsaData));
 
-    int errorCode = WSAStartup(WINSOCK_VERSION, &wsaData);
+    int errorCode = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (NO_ERROR != errorCode)
     {
         std::cerr << "WSAStartup() failed." << std::endl;
@@ -477,15 +542,18 @@ int main()
     msg.insert(msg.end(), reinterpret_cast<char*>(&myUDPPort), reinterpret_cast<char*>(&myUDPPort) + 2);
     sendAll(g_tcpSocket, msg.data(), (int)msg.size());
 
-    // wait for id from server
-    char idRsp;
-    if (!recvAll(g_tcpSocket, &idRsp, 1) || idRsp == -1) 
+    // wait for response from server
+    JoinResponse jr;
+    if (!recvAll(g_tcpSocket, &jr, sizeof(jr)) || (int32_t)ntohl(jr.playerID) == -1) 
     {
         std::cerr << "Server is full or rejected connection.\n";
         return 1;
     }
-    g_myPlayerID = static_cast<uint32_t>(idRsp);
-    std::cout << "[Client] Joined as Player " << g_myPlayerID << "\n";
+    g_myPlayerID = ntohl(jr.playerID);
+    g_totalKills = ntohl(jr.totalKills);
+    g_hasUpgradedGun = jr.hasUpgradedGun;
+
+    std::cout << "[Client] Joined as Player " << g_myPlayerID << " | Kills: " << g_totalKills << " | Gun Upgraded: " << (g_hasUpgradedGun ? "Yes" : "No") << "\n";
 
     g_audio = new AudioManager();
     g_audio->PlayBGM(ingame_BGM_audio);
@@ -545,6 +613,11 @@ int main()
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
             drawMainMenu(winW, winH, mouseX, mouseY, mousePressed, mouseWasPressed);
         }
+        else if (g_appState == AppState::EXP_SCREEN)
+        {
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            drawEXP(winW, winH, mouseX, mouseY, mousePressed, mouseWasPressed);
+        }
         else if (g_appState == AppState::WAITING_ROOM)
         {
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
@@ -556,6 +629,7 @@ int main()
             heartbeatPkt.playerID = htonl(g_myPlayerID);
             heartbeatPkt.w_pressed = heartbeatPkt.a_pressed = heartbeatPkt.s_pressed = heartbeatPkt.d_pressed = heartbeatPkt.space_pressed = false;
             heartbeatPkt.aimAngle = 0.0f;
+            heartbeatPkt.hasUpgradedGun = g_hasUpgradedGun;
             send(g_udpSocket, reinterpret_cast<const char*>(&heartbeatPkt), sizeof(heartbeatPkt), 0);
         }
         else if (g_appState == AppState::IN_GAME)
@@ -704,6 +778,7 @@ int main()
                 inputPkt.d_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS);
                 inputPkt.space_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
                 inputPkt.aimAngle = 0.0f;
+                inputPkt.hasUpgradedGun = g_hasUpgradedGun;
 
                 send(g_udpSocket, reinterpret_cast<const char*>(&inputPkt), sizeof(inputPkt), 0);
             }
@@ -738,12 +813,12 @@ int main()
                 else if (id % 4 == 3) { r = 0.8f; g = 0.8f; }   // Player 3: Yellow
 
                 bool isMe = (id == g_myPlayerID);
-                drawTank(px, py, r, g, b, pAngle, pHP, pShootCD, isMe);
+                drawTank(px, py, r, g, b, pAngle, pHP, pShootCD, isMe, pair.second.hasUpgradedGun);
             }
 
             // draw proj
             for (const auto& proj : projsToDraw)
-                drawProjectile(proj.x, proj.y);
+                drawProjectile(proj.x, proj.y, proj.isUpgraded != 0);
 
             // draw floating name
             for (const auto& pair : playersToDraw)

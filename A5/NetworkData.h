@@ -1,7 +1,7 @@
 /* Start Header
 *****************************************************************/
 /*!
-\file NetworkData.cpp
+\file NetworkData.h
 \authors
 \   Lai Jun Jie Clement (junjieclement.lai@digipen.edu)
 \   Aryan bin Mohamed Isran (aryan.b@digipen.edu)
@@ -22,6 +22,19 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 #include <cstdint>
 
 #pragma pack(push, 1)
+
+#define REQ_JOIN         (unsigned char)0x06
+#define REQ_TOGGLE_READY (unsigned char)0x09
+#define REQ_CHEAT_WIN    (unsigned char)0x0A
+#define REQ_CHAT         (unsigned char)0x0B
+#define REQ_BUY_UPGRADE  (unsigned char)0x0C
+
+struct JoinResponse {
+    uint32_t playerID;
+    int32_t totalKills;
+    uint8_t hasUpgradedGun; // use 1 byte explicitly
+};
+
 struct PlayerState {
     uint32_t playerID;
     char name[16];
@@ -29,16 +42,19 @@ struct PlayerState {
     float y;
     float aimAngle;
     int32_t hp;
-    int32_t kills;
-    bool justShot;
-    bool justHit;
+    int32_t kills; // current match
+    int32_t totalKills; // persistent
+    uint8_t justShot;
+    uint8_t justHit;
     int32_t shootCooldown;
-    bool isReady;
+    uint8_t isReady;
+    uint8_t hasUpgradedGun;
 };
 
 struct ProjectileState {
     float x;
     float y;
+    uint8_t isUpgraded;
 };
 
 struct GameStateHeader {
@@ -52,13 +68,15 @@ struct GameStateHeader {
 struct InputPacket {
     uint32_t sequenceNum;
     uint32_t playerID;
-    bool w_pressed;
-    bool a_pressed;
-    bool s_pressed;
-    bool d_pressed;
-    bool space_pressed;
+    uint8_t w_pressed;
+    uint8_t a_pressed;
+    uint8_t s_pressed;
+    uint8_t d_pressed;
+    uint8_t space_pressed;
     float aimAngle;
+    uint8_t hasUpgradedGun;
 };
+
 #pragma pack(pop)
 
 constexpr int MAX_PLAYERS = 4;
@@ -108,4 +126,3 @@ inline bool isWall(float x, float y) {
 
     return ARENA_MAP[row][col] == 1;
 }
-

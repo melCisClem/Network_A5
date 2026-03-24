@@ -32,13 +32,13 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 #include <mutex>
 #include <atomic>
 #include <chrono>
+#include <fstream>
+#include <sstream>
+#include <map>
 
 #include "../NetworkData.h"
 
-#define REQ_JOIN (unsigned char)0x06
-#define REQ_TOGGLE_READY (unsigned char)0x09
-#define REQ_CHEAT_WIN    (unsigned char)0x0A
-#define REQ_CHAT         (unsigned char)0x0B
+// Define application return codes
 #define RETURN_CODE_1       1
 #define RETURN_CODE_2       2
 #define RETURN_CODE_3       3
@@ -47,6 +47,7 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 std::atomic<bool> g_running{ true };
 SOCKET g_serverUDPSocket = INVALID_SOCKET;
 
+// Player structure to keep track of state
 struct Player {
     sockaddr_in udpAddr{};
     SOCKET tcpSocket = INVALID_SOCKET;
@@ -62,14 +63,101 @@ struct Player {
     bool space = false;
     bool justShot = false;
     bool justHit = false;
+    bool hasUpgradedGun = false;
+    int32_t totalKills = 0;
 };
 
+// Persistence structures
+struct PlayerStats {
+    int32_t totalKills = 0;
+    bool hasUpgradedGun = false;
+};
+
+std::map<std::string, PlayerStats> g_db;
+std::mutex g_dbMtx;
+
+// global states
+Player g_players[MAX_PLAYERS];
+
+// Save the player database to a text file
+void SaveDB()
+{
+    std::lock_guard<std::mutex> lock(g_dbMtx);
+    std::ofstream f("player_database.txt");
+    if (f.is_open())
+    {
+        for (const auto& pair : g_db)
+        {
+            f << pair.first << "," << pair.second.totalKills << "," << (pair.second.hasUpgradedGun ? 1 : 0) << "\n";
+        }
+        f.close();
+    }
+}
+
+// Load the player database from a text file
+void LoadDB()
+{
+    std::lock_guard<std::mutex> lock(g_dbMtx);
+    g_db.clear();
+    std::ifstream f("player_database.txt");
+    if (f.is_open())
+    {
+        std::string line;
+        while (std::getline(f, line))
+        {
+            std::stringstream ss(line);
+            std::string name, killsStr, upStr;
+            if (std::getline(ss, name, ',') && 
+                std::getline(ss, killsStr, ',') && 
+                std::getline(ss, upStr, ','))
+            {
+                PlayerStats ps;
+                ps.totalKills = std::stoi(killsStr);
+                ps.hasUpgradedGun = (std::stoi(upStr) == 1);
+                g_db[name] = ps;
+            }
+        }
+        f.close();
+    }
+}
+
+// Sync in-memory player state to the database map
+void SyncPlayerToDB(int i)
+{
+    std::lock_guard<std::mutex> lock(g_dbMtx);
+    g_db[g_players[i].name].totalKills = g_players[i].totalKills;
+    g_db[g_players[i].name].hasUpgradedGun = g_players[i].hasUpgradedGun;
+}
+
+// Sync in-memory player state from the database map
+void SyncPlayerFromDB(int i)
+{
+    std::lock_guard<std::mutex> lock(g_dbMtx);
+    if (g_db.count(g_players[i].name))
+    {
+        g_players[i].totalKills = g_db[g_players[i].name].totalKills;
+        g_players[i].hasUpgradedGun = g_db[g_players[i].name].hasUpgradedGun;
+    }
+    else
+    {
+        g_players[i].totalKills = 0;
+        g_players[i].hasUpgradedGun = false;
+        
+        PlayerStats ps;
+        ps.totalKills = 0;
+        ps.hasUpgradedGun = false;
+        g_db[g_players[i].name] = ps;
+    }
+}
+
+// Projectile structure
 struct Projectile {
     float x = 0.0f, y = 0.0f;
     float vx = 0.0f, vy = 0.0f;
     int ownerID = -1;
     int lifeTimer = 0;
     bool active = false;
+    bool isUpgraded = false;
 };
 
 std::mutex g_stateMtx;
@@ -77,15 +165,14 @@ int g_matchState = 0;
 int g_winnerID = -1;
 int g_gameOverTimer = 0;
 
-Player g_players[MAX_PLAYERS];
 Projectile g_projectiles[MAX_PROJECTILES];
 
+// Game parameters
 float g_moveSpeed = 0.015f;
 float g_turnSpeed = 3.0f;
 float g_bulletSpeed = 0.05f;
 
-
-// from A4
+// Helper to receive all data from a TCP socket
 static bool recvAll(SOCKET s, void* buf, int len) 
 {
     char* ptr = reinterpret_cast<char*>(buf);
@@ -100,7 +187,7 @@ static bool recvAll(SOCKET s, void* buf, int len)
     return true;
 }
 
-// from A4
+// Helper to send all data through a TCP socket
 static bool sendAll(SOCKET s, const void* data, int len) 
 {
     const char* ptr = reinterpret_cast<const char*>(data);
@@ -140,18 +227,14 @@ void udpReceiverThread()
                 std::lock_guard<std::mutex> lk(g_stateMtx);
                 if (g_players[id].connected) 
                 {
-                    if (g_players[id].udpAddr.sin_port != from.sin_port || g_players[id].udpAddr.sin_addr.s_addr != from.sin_addr.s_addr)
-                    {
-                        char ipStr[INET_ADDRSTRLEN];
-                        inet_ntop(AF_INET, &from.sin_addr, ipStr, INET_ADDRSTRLEN);
-                        std::cout << "[Server] Latching UDP for Player " << id << " to " << ipStr << ":" << ntohs(from.sin_port) << std::endl;
-                    }
-                    g_players[id].udpAddr = from; // Store the address we actually received from
-                    g_players[id].up = pkt->w_pressed;
-                    g_players[id].down = pkt->s_pressed;
-                    g_players[id].left = pkt->a_pressed;
-                    g_players[id].right = pkt->d_pressed;
-                    g_players[id].space = pkt->space_pressed;
+                    // Update player inputs from packet
+                    g_players[id].udpAddr = from;
+                    g_players[id].up = pkt->w_pressed != 0;
+                    g_players[id].down = pkt->s_pressed != 0;
+                    g_players[id].left = pkt->a_pressed != 0;
+                    g_players[id].right = pkt->d_pressed != 0;
+                    g_players[id].space = pkt->space_pressed != 0;
+                    g_players[id].hasUpgradedGun = pkt->hasUpgradedGun != 0;
                 }
             }
         }
@@ -172,7 +255,7 @@ void serverGameLoop()
         {
             std::lock_guard<std::mutex> lk(g_stateMtx);
 
-            // reset audio flags at start of evrey tick
+            // reset audio flags at start of every tick
             for (int i = 0; i < MAX_PLAYERS; i++) 
             {
                 g_players[i].justShot = false;
@@ -199,13 +282,13 @@ void serverGameLoop()
                 {
                     if (g_players[i].connected)
                     {
-                        // A n D
+                        // Handle rotation (A n D)
                         if (g_players[i].left)  g_players[i].aimAngle += g_turnSpeed; // CCW
                         if (g_players[i].right) g_players[i].aimAngle -= g_turnSpeed; // CW
 
                         float rad = g_players[i].aimAngle * 3.14159f / 180.0f;
 
-                        // W n S
+                        // Handle movement (W n S)
                         if (g_players[i].up)
                         {
                             float newX = g_players[i].x + cos(rad) * g_moveSpeed;
@@ -229,6 +312,7 @@ void serverGameLoop()
                             }
                         }
 
+                        // Shooting logic
                         if (g_players[i].space && g_players[i].shootCooldown <= 0)
                         {
                             for (int j = 0; j < MAX_PROJECTILES; j++)
@@ -245,6 +329,8 @@ void serverGameLoop()
 
                                     g_projectiles[j].vx = cos(rad) * g_bulletSpeed;
                                     g_projectiles[j].vy = sin(rad) * g_bulletSpeed;
+
+                                    g_projectiles[j].isUpgraded = g_players[i].hasUpgradedGun;
 
                                     g_players[i].shootCooldown = tank_shootCooldown;
                                     g_players[i].justShot = true;
@@ -273,11 +359,11 @@ void serverGameLoop()
                             // cant hit ownself n dead players
                             if (g_players[p].connected && p != g_projectiles[j].ownerID && g_players[p].hp > 0) 
                             {
-
                                 float dx = g_projectiles[j].x - g_players[p].x;
                                 float dy = g_projectiles[j].y - g_players[p].y;
 
-                                if ((dx * dx + dy * dy) < (0.06f * 0.06f)) 
+                                float collisionRadius = g_projectiles[j].isUpgraded ? 0.12f : 0.06f; // twice the size (radius)
+                                if ((dx * dx + dy * dy) < (collisionRadius * collisionRadius)) 
                                 {
                                     g_players[p].hp -= BULLET_DAMAGE;
                                     g_players[p].justHit = true;
@@ -285,7 +371,7 @@ void serverGameLoop()
                                     // respawn
                                     if (g_players[p].hp <= 0) 
                                     {
-                                        g_players[p].x = 0.0f; //  middle of the map
+                                        g_players[p].x = 0.0f; // middle of the map
                                         g_players[p].y = 0.0f;
                                         g_players[p].hp = MAX_HP;
 
@@ -299,7 +385,7 @@ void serverGameLoop()
                                             {
                                                 g_matchState = 2;
                                                 g_winnerID = shooterID;
-                                                g_gameOverTimer = gameOverTimer; // 5 seconds ( 60 * 5 )
+                                                g_gameOverTimer = gameOverTimer; // 5 seconds
                                                 std::cout << "[Server] Player " << shooterID << " won!\n";
                                             }
                                         }
@@ -318,27 +404,35 @@ void serverGameLoop()
                     }
                 }
             }
-            else if (g_matchState == 2)
+            else if (g_matchState == 2) // game over state
             {
                 g_gameOverTimer--;
                 if (g_gameOverTimer <= 0)
                 {
                     for (int i = 0; i < MAX_PLAYERS; i++) 
                     {
+                        if (g_players[i].connected)
+                        {
+                            g_players[i].totalKills += g_players[i].kills;
+                            SyncPlayerToDB(i);
+                        }
                         g_players[i].isReady = false;
                         g_players[i].kills = 0;
                         g_players[i].hp = MAX_HP;
+                    }
+                    for (int i = 0; i < MAX_PROJECTILES; i++)
+                    {
                         g_projectiles[i].active = false;
                     }
+                    SaveDB();
                     g_matchState = 0;
                     g_winnerID = -1;
                     std::cout << "[Server] Match reset. Returning players to menus.\n";
                 }
             }
-
         }
 
-        // building the packet
+        // building the packet header
         GameStateHeader header;
         header.sequenceNum = htonl(sequence++);
         header.matchState = htonl(g_matchState);
@@ -352,7 +446,7 @@ void serverGameLoop()
         {
             std::lock_guard<std::mutex> lk(g_stateMtx);
 
-            // pack players 1st
+            // pack players first
             for (int i = 0; i < MAX_PLAYERS; i++) 
             {
                 if (g_players[i].connected) 
@@ -365,16 +459,18 @@ void serverGameLoop()
                     ps.aimAngle = g_players[i].aimAngle;
                     ps.hp = htonl((uint32_t)g_players[i].hp);
                     ps.kills = htonl((uint32_t)g_players[i].kills);
-                    ps.justShot = g_players[i].justShot;
-                    ps.justHit = g_players[i].justHit;
+                    ps.totalKills = htonl((uint32_t)g_players[i].totalKills);
+                    ps.justShot = g_players[i].justShot ? 1 : 0;
+                    ps.justHit = g_players[i].justHit ? 1 : 0;
                     ps.shootCooldown = htonl((uint32_t)g_players[i].shootCooldown);
-                    ps.isReady = g_players[i].isReady;
+                    ps.isReady = g_players[i].isReady ? 1 : 0;
+                    ps.hasUpgradedGun = g_players[i].hasUpgradedGun ? 1 : 0;
 
                     pktData.insert(pktData.end(), reinterpret_cast<char*>(&ps), reinterpret_cast<char*>(&ps) + sizeof(ps));
                 }
             }
 
-            // then pack proj
+            // then pack projectiles
             for (int j = 0; j < MAX_PROJECTILES; j++) 
             {
                 if (g_projectiles[j].active)
@@ -382,12 +478,13 @@ void serverGameLoop()
                     ProjectileState proj;
                     proj.x = g_projectiles[j].x;
                     proj.y = g_projectiles[j].y;
+                    proj.isUpgraded = g_projectiles[j].isUpgraded ? 1 : 0;
                     pktData.insert(pktData.end(), reinterpret_cast<char*>(&proj), reinterpret_cast<char*>(&proj) + sizeof(proj));
                 }
             }
         }
 
-        // broadcast
+        // broadcast game state
         {
             std::lock_guard<std::mutex> lk(g_stateMtx);
             for (int i = 0; i < MAX_PLAYERS; i++) 
@@ -406,19 +503,22 @@ int main()
     WSADATA wsaData;
     SecureZeroMemory(&wsaData, sizeof(wsaData));
 
-    int errorCode = WSAStartup(WINSOCK_VERSION, &wsaData);
+    int errorCode = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (NO_ERROR != errorCode)
     {
         std::cerr << "WSAStartup() failed." << std::endl;
         return errorCode;
     }
 
-    // display to cmd for connecting
+    // Load persistent database
+    LoadDB();
+
+    // display IP addresses for connecting
     char hostname[256];
     if (gethostname(hostname, sizeof(hostname)) == 0)
     {
         addrinfo hints{}, * res = nullptr;
-        hints.ai_family = AF_INET; // IPv4
+        hints.ai_family = AF_INET; 
         hints.ai_socktype = SOCK_STREAM;
 
         if (getaddrinfo(hostname, nullptr, &hints, &res) == 0) 
@@ -431,7 +531,6 @@ int main()
                 char ipStr[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &addr->sin_addr, ipStr, sizeof(ipStr));
 
-                // ignore the loopback address
                 if (std::string(ipStr) != "127.0.0.1")
                     std::cout << "Server IP Address: " << ipStr << std::endl;
             }
@@ -464,7 +563,7 @@ int main()
     listen(listenerSocket, SOMAXCONN);
     freeaddrinfo(tcpInfo);
 
-    // UDP
+    // UDP socket setup
     addrinfo udpHints{}, * udpInfo = nullptr;
     udpHints.ai_family = AF_INET;
     udpHints.ai_socktype = SOCK_DGRAM;
@@ -485,6 +584,7 @@ int main()
 
     std::cout << "Server running on TCP: " << tcpPortStr << ", UDP: " << udpPortStr << "\n";
 
+    // Spawn game threads
     std::thread gameThread(serverGameLoop);
     std::thread udpThread(udpReceiverThread);
 
@@ -507,7 +607,6 @@ int main()
                     recvAll(clientSocket, &clientIP_net, 4) &&
                     recvAll(clientSocket, &clientPort_net, 2))
                 {
-
                     int assignedID = -1;
                     {
                         std::lock_guard<std::mutex> lk(g_stateMtx);
@@ -532,10 +631,15 @@ int main()
                             nameBuf[15] = '\0';
                             g_players[assignedID].name = std::string(nameBuf);
 
+                            // Load persistent stats for this player name
+                            SyncPlayerFromDB(assignedID);
+
                             char ipStr[INET_ADDRSTRLEN];
                             inet_ntop(AF_INET, &clientIP_net, ipStr, INET_ADDRSTRLEN);
-                            std::cout << "[Server] Player " << assignedID << " joined from " << ipStr << ":" << ntohs(clientPort_net) << std::endl;
+                            std::cout << "[Server] Player " << assignedID << " (" << g_players[assignedID].name 
+                                      << ") joined from " << ipStr << ":" << ntohs(clientPort_net) << std::endl;
 
+                            // Handle spawn logic
                             int spawnMarker = assignedID + 2;
                             bool foundSpawn = false;
 
@@ -545,12 +649,9 @@ int main()
                                 {
                                     if (ARENA_MAP[row][col] == spawnMarker) 
                                     {
-
                                         g_players[assignedID].x = ((col + 0.5f) * 2.0f / MAP_WIDTH) - 1.0f;
                                         g_players[assignedID].y = ((row + 0.5f) * 2.0f / MAP_HEIGHT) - 1.0f;
-
                                         g_players[assignedID].aimAngle = atan2(-g_players[assignedID].y, -g_players[assignedID].x) * 180.0f / 3.14159f;
-
                                         foundSpawn = true;
                                         break;
                                     }
@@ -558,7 +659,6 @@ int main()
                                 if (foundSpawn) break;
                             }
 
-                            // if nvr set spawn ptn then auto spawn in center
                             if (!foundSpawn) 
                             {
                                 g_players[assignedID].x = 0.0f;
@@ -567,22 +667,21 @@ int main()
                             }
 
                             g_players[assignedID].hp = MAX_HP;
-
-                            g_players[assignedID].up = false;
-                            g_players[assignedID].down = false;
-                            g_players[assignedID].left = false;
-                            g_players[assignedID].right = false;
-                            g_players[assignedID].space = false;
+                            g_players[assignedID].kills = 0;
+                            g_players[assignedID].up = g_players[assignedID].down = g_players[assignedID].left = g_players[assignedID].right = g_players[assignedID].space = false;
                         }
                     }
 
-                    char idMsg = static_cast<char>(assignedID);
-                    sendAll(clientSocket, &idMsg, 1);
-
                     if (assignedID != -1)
                     {
-                        std::cout << "[Server] Player " << assignedID << " joined.\n";
+                        // Send join response with persistent stats
+                        JoinResponse jr;
+                        jr.playerID = htonl((uint32_t)assignedID);
+                        jr.totalKills = htonl((int32_t)g_players[assignedID].totalKills);
+                        jr.hasUpgradedGun = g_players[assignedID].hasUpgradedGun ? 1 : 0;
+                        sendAll(clientSocket, &jr, sizeof(jr));
 
+                        // Spawn TCP thread for this client
                         std::thread clientTCPThread([clientSocket, assignedID]()
                         {
                             char cmdBuf[1];
@@ -598,13 +697,24 @@ int main()
                                 else if (cmdBuf[0] == REQ_CHEAT_WIN)
                                 {
                                     std::lock_guard<std::mutex> lk(g_stateMtx);
-
                                     if (g_matchState == 1)
                                     {
                                         g_matchState = 2;
                                         g_winnerID = assignedID;
-                                        g_gameOverTimer = gameOverTimer;  // 5 sec
-                                        std::cout << "[Server] Player " << assignedID << " used the INSTA-WIN cheat!\n";
+                                        g_gameOverTimer = gameOverTimer;
+                                        std::cout << "[Server] Player " << assignedID << " used cheat!\n";
+                                    }
+                                }
+                                else if (cmdBuf[0] == REQ_BUY_UPGRADE)
+                                {
+                                    std::lock_guard<std::mutex> lk(g_stateMtx);
+                                    if (!g_players[assignedID].hasUpgradedGun && g_players[assignedID].totalKills >= 10)
+                                    {
+                                        g_players[assignedID].totalKills -= 10;
+                                        g_players[assignedID].hasUpgradedGun = true;
+                                        SyncPlayerToDB(assignedID);
+                                        SaveDB();
+                                        std::cout << "[Server] Player " << assignedID << " upgraded their gun!\n";
                                     }
                                 }
                                 else if (cmdBuf[0] == REQ_CHAT)
@@ -643,16 +753,23 @@ int main()
                                 }
                             }
 
+                            // Disconnect handling
                             std::cout << "[Server] Player " << assignedID << " disconnected.\n";
-                            std::lock_guard<std::mutex> lk(g_stateMtx);
-                            g_players[assignedID].connected = false;
-                            g_players[assignedID].tcpSocket = INVALID_SOCKET;
-                            g_players[assignedID].x = 10.0f;
-                            g_players[assignedID].up = g_players[assignedID].down = g_players[assignedID].left = g_players[assignedID].right = false;
+                            {
+                                std::lock_guard<std::mutex> lk(g_stateMtx);
+                                // Persistent save on disconnect
+                                g_players[assignedID].totalKills += g_players[assignedID].kills;
+                                SyncPlayerToDB(assignedID);
+                                SaveDB();
+
+                                g_players[assignedID].connected = false;
+                                g_players[assignedID].tcpSocket = INVALID_SOCKET;
+                                g_players[assignedID].x = 10.0f;
+                                g_players[assignedID].y = 10.0f;
+                            }
                             closesocket(clientSocket);
                         });
                         clientTCPThread.detach();
-
                     }
                     else 
                     {
