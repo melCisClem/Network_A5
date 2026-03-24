@@ -411,7 +411,7 @@ int main()
         g_playerName = nameInput;
 
     std::string tcpPortStr = "27015";
-    uint16_t serverUDPPort = 27016;
+    uint16_t serverUDPPort = 27015;
 
     // TCP for establishing link
     addrinfo tcpHints{}, * tcpInfo = nullptr;
@@ -458,6 +458,13 @@ int main()
     getsockname(g_udpSocket, (sockaddr*)&localAddr, &localLen);
     uint16_t myUDPPort = localAddr.sin_port;
 
+    // setup server UDP info and connect() it for better NAT traversal
+    sockaddr_in serverUdpAddr{};
+    serverUdpAddr.sin_family = AF_INET;
+    inet_pton(AF_INET, serverIPStr.c_str(), &serverUdpAddr.sin_addr);
+    serverUdpAddr.sin_port = htons(serverUDPPort);
+    connect(g_udpSocket, (sockaddr*)&serverUdpAddr, sizeof(serverUdpAddr));
+
     std::vector<char> msg;
     msg.push_back(REQ_JOIN);
 
@@ -479,12 +486,6 @@ int main()
     }
     g_myPlayerID = static_cast<uint32_t>(idRsp);
     std::cout << "[Client] Joined as Player " << g_myPlayerID << "\n";
-
-    // setup server UDP info
-    sockaddr_in serverUdpAddr{};
-    serverUdpAddr.sin_family = AF_INET;
-    inet_pton(AF_INET, serverIPStr.c_str(), &serverUdpAddr.sin_addr);
-    serverUdpAddr.sin_port = htons(serverUDPPort);
 
     g_audio = new AudioManager();
     g_audio->PlayBGM(ingame_BGM_audio);
@@ -555,7 +556,7 @@ int main()
             heartbeatPkt.playerID = htonl(g_myPlayerID);
             heartbeatPkt.w_pressed = heartbeatPkt.a_pressed = heartbeatPkt.s_pressed = heartbeatPkt.d_pressed = heartbeatPkt.space_pressed = false;
             heartbeatPkt.aimAngle = 0.0f;
-            sendto(g_udpSocket, reinterpret_cast<const char*>(&heartbeatPkt), sizeof(heartbeatPkt), 0, (sockaddr*)&serverUdpAddr, sizeof(serverUdpAddr));
+            send(g_udpSocket, reinterpret_cast<const char*>(&heartbeatPkt), sizeof(heartbeatPkt), 0);
         }
         else if (g_appState == AppState::IN_GAME)
         {
@@ -704,7 +705,7 @@ int main()
                 inputPkt.space_pressed = !g_isTabbed && !g_isPaused && isFocused && (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
                 inputPkt.aimAngle = 0.0f;
 
-                sendto(g_udpSocket, reinterpret_cast<const char*>(&inputPkt), sizeof(inputPkt), 0, (sockaddr*)&serverUdpAddr, sizeof(serverUdpAddr));
+                send(g_udpSocket, reinterpret_cast<const char*>(&inputPkt), sizeof(inputPkt), 0);
             }
             // render
             glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
