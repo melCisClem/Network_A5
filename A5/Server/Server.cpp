@@ -473,10 +473,13 @@ void serverGameLoop()
         // building the packet header
         GameStateHeader header;
         header.sequenceNum = htonl(sequence++);
-        header.matchState = htonl(g_matchState);
+        {
+            std::lock_guard<std::mutex> lk(g_stateMtx);
+            header.matchState = htonl(g_matchState);
+            header.winnerID = htonl(g_winnerID);
+        }
         header.numPlayers = htonl(activePlayers);
         header.numProjectiles = htonl(activeProjectiles);
-        header.winnerID = htonl(g_winnerID);
 
         std::vector<char> pktData;
         pktData.insert(pktData.end(), reinterpret_cast<char*>(&header), reinterpret_cast<char*>(&header) + sizeof(header));

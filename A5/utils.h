@@ -32,17 +32,17 @@ enum class AppState {
     IN_GAME,
     EXP_SCREEN
 };
-AppState g_appState = AppState::MAIN_MENU;
+inline std::atomic<AppState> g_appState{ AppState::MAIN_MENU };
 
 std::string g_playerName = "Player";
-inline int g_totalKills = 0;
-inline bool g_hasUpgradedGun = false;
-inline uint32_t g_myPlayerID = 0;
-inline int32_t g_matchState = 0; 
-inline int32_t g_winnerID = -1;
+inline std::atomic<int> g_totalKills{ 0 };
+inline std::atomic<bool> g_hasUpgradedGun{ false };
+inline std::atomic<uint32_t> g_myPlayerID{ 0 };
+inline std::atomic<int32_t> g_matchState{ 0 }; 
+inline std::atomic<int32_t> g_winnerID{ -1 };
 
-std::mutex g_stateMtx;
-uint32_t g_lastSeq = 0;
+inline std::mutex g_stateMtx;
+inline std::atomic<uint32_t> g_lastSeq{ 0 };
 struct ClientPlayer {
     std::string name;
     float x, y;

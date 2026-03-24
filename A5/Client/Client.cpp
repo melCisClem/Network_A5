@@ -169,9 +169,10 @@ void drawChat(int winW, int winH)
 
 void DisconnectFromServer()
 {
-    if (!g_isConnected) return;
-    g_isConnected = false;
-
+    // Use g_isConnected as a flag to ensure we only run this once effectively
+    // But we still want to join threads even if g_isConnected was set to false by a thread
+    bool wasConnected = g_isConnected.exchange(false);
+    
     // Shutdown and close sockets to unblock recv calls
     if (g_tcpSocket != INVALID_SOCKET) {
         shutdown(g_tcpSocket, SD_BOTH);
@@ -183,9 +184,16 @@ void DisconnectFromServer()
         g_udpSocket = INVALID_SOCKET;
     }
 
-    // Join threads
-    if (g_tTCP.joinable()) g_tTCP.join();
-    if (g_tUDP.joinable()) g_tUDP.join();
+    // Join threads (but NOT if we are currently IN one of those threads)
+    auto myId = std::this_thread::get_id();
+    if (g_tTCP.joinable()) {
+        if (myId != g_tTCP.get_id()) g_tTCP.join();
+        else g_tTCP.detach();
+    }
+    if (g_tUDP.joinable()) {
+        if (myId != g_tUDP.get_id()) g_tUDP.join();
+        else g_tUDP.detach();
+    }
 
     // Reset game state
     {
@@ -204,7 +212,8 @@ void DisconnectFromServer()
     g_isTabbed = false;
     g_isTyping = false;
 
-    std::cout << "[Client] Disconnected from server.\n";
+    if (wasConnected)
+        std::cout << "[Client] Disconnected from server.\n";
 }
 
 void udpReceiverThread() 
@@ -219,7 +228,7 @@ void udpReceiverThread()
         fromLen = sizeof(from);
         int r = recvfrom(g_udpSocket, buf.data(), (int)buf.size(), 0, (sockaddr*)&from, &fromLen);
 
-        if (r > 0 && r >= sizeof(GameStateHeader)) 
+        if (r > 0 && r >= (int)sizeof(GameStateHeader)) 
         {
             auto* header = reinterpret_cast<GameStateHeader*>(buf.data());
             uint32_t seq = ntohl(header->sequenceNum);
@@ -234,10 +243,10 @@ void udpReceiverThread()
                 g_appState = AppState::IN_GAME;
             else if (matchState == 0 && g_appState == AppState::IN_GAME) 
             {
+                // Return to main menu as intended, but let the main thread handle DisconnectFromServer
                 g_appState = AppState::MAIN_MENU;
                 g_isPaused = false;
                 g_isTabbed = false;
-                DisconnectFromServer();
             }
 
             int expectedSize = sizeof(GameStateHeader) + (numPlayers * sizeof(PlayerState)) + (numProjs * sizeof(ProjectileState));
