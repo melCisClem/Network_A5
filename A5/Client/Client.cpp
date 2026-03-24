@@ -165,9 +165,11 @@ void udpReceiverThread()
     std::vector<char> buf(UDPPACKET_BUFFER_SIZE);
     sockaddr_in from{};
     int fromLen = sizeof(from);
+    bool isFirstPacket = true;
 
     while (g_running) 
     {
+        fromLen = sizeof(from);
         int r = recvfrom(g_udpSocket, buf.data(), (int)buf.size(), 0, (sockaddr*)&from, &fromLen);
 
         if (r >= sizeof(GameStateHeader)) 
@@ -194,8 +196,9 @@ void udpReceiverThread()
             if (r >= expectedSize) 
             {
                 std::lock_guard<std::mutex> lock(g_stateMtx);
-                if (seq > g_lastSeq) 
+                if (isFirstPacket || seq > g_lastSeq) 
                 {
+                    isFirstPacket = false;
                     g_lastSeq = seq;
 
                     char* payloadPtr = buf.data() + sizeof(GameStateHeader);

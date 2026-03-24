@@ -118,7 +118,7 @@ static bool sendAll(SOCKET s, const void* data, int len)
 // listen for inputs from ALL clients
 void udpReceiverThread() 
 {
-    std::vector<char> buf(sizeof(InputPacket));
+    std::vector<char> buf(UDPPACKET_BUFFER_SIZE);
     sockaddr_in from{};
     int fromLen = sizeof(from);
 
@@ -130,7 +130,7 @@ void udpReceiverThread()
     {
         fromLen = sizeof(from);
         int r = recvfrom(g_serverUDPSocket, buf.data(), (int)buf.size(), 0, (sockaddr*)&from, &fromLen);
-        if (r == sizeof(InputPacket)) 
+        if (r >= (int)sizeof(InputPacket)) 
         {
             auto* pkt = reinterpret_cast<InputPacket*>(buf.data());
 
