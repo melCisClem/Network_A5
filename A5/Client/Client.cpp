@@ -132,6 +132,26 @@ void tcpReceiverThread()
                     }
                 }
             }
+            else if (cmdBuf[0] == REQ_LEADERBOARD)
+            {
+                uint32_t countNet;
+                if (recvAll(g_tcpSocket, &countNet, 4))
+                {
+                    uint32_t count = ntohl(countNet);
+                    std::vector<std::pair<std::string, int>> newLB;
+                    for (uint32_t i = 0; i < count; i++)
+                    {
+                        LeaderboardEntry entry;
+                        if (recvAll(g_tcpSocket, &entry, sizeof(entry))) 
+                        {
+                            entry.name[15] = '\0';
+                            newLB.push_back({ std::string(entry.name), (int)ntohl(entry.totalKills) });
+                        }
+                    }
+                    std::lock_guard<std::mutex> lock(g_lbMtx);
+                    g_globalLeaderboard = newLB;
+                }
+            }
         }
         else
         {
@@ -208,6 +228,10 @@ void DisconnectFromServer()
         std::lock_guard<std::mutex> lock(g_chatMtx);
         g_chatMessages.clear();
     }
+    {
+        std::lock_guard<std::mutex> lock(g_lbMtx);
+        g_globalLeaderboard.clear();
+    }
     g_isPaused = false;
     g_isTabbed = false;
     g_isTyping = false;
@@ -244,6 +268,9 @@ void udpReceiverThread()
             else if (matchState == 0 && g_appState == AppState::IN_GAME) 
             {
                 // Return to main menu as intended, but let the main thread handle DisconnectFromServer
+                if (g_renderPlayers.count(g_myPlayerID))
+                    g_totalKills += g_renderPlayers[g_myPlayerID].kills;
+
                 g_appState = AppState::MAIN_MENU;
                 g_isPaused = false;
                 g_isTabbed = false;
@@ -460,6 +487,30 @@ void drawWaitingRoom(int winW, int winH, float mouseX, float mouseY, bool mouseP
         char req = REQ_TOGGLE_READY;
         sendAll(g_tcpSocket, &req, 1);
     }
+
+    // exit back to mainmenu button
+    float backY = -0.85f;
+    bool backHovered = (mouseX >= -0.2f && mouseX <= 0.2f && mouseY >= backY - 0.08f && mouseY <= backY + 0.08f);
+
+    glColor3f(backHovered ? 0.8f : 0.6f, 0.2f, 0.2f); // Reddish color for EXIT
+    glBegin(GL_QUADS);
+    glVertex2f(-0.2f, backY - 0.08f); glVertex2f(0.2f, backY - 0.08f);
+    glVertex2f(0.2f, backY + 0.08f);  glVertex2f(-0.2f, backY + 0.08f);
+    glEnd();
+
+    float backPixelY = (1.0f - (backY + 1.0f) * 0.5f) * winH;
+    drawTextScreen(centerX - 40.0f, backPixelY + 10.0f, "BACK", 1.0f, 1.0f, 1.0f, g_fontScoreboard, g_dataScoreboard);
+
+    if (backHovered && mousePressed && !mouseWasPressed)
+    {
+        if (amIReady)
+        {
+            char req = REQ_TOGGLE_READY;
+            sendAll(g_tcpSocket, &req, 1);
+        }
+
+        g_appState = AppState::MAIN_MENU;
+    }
 }
 
 void drawMainMenu(int winW, int winH, float mouseX, float mouseY, bool mousePressed, bool& mouseWasPressed)
@@ -519,10 +570,10 @@ void drawEXP(int winW, int winH, float mouseX, float mouseY, bool mousePressed, 
 
     float centerX = winW * 0.5f;
 
-    drawTextScreen(centerX - 130.f, winH * 0.15f, "EXP SCREEN", 1.f, 0.8f, 0.2f, g_fontMainMenuLarge, g_dataMainMenuLarge);
+    drawTextScreen(centerX - 220.f, winH * 0.15f, "EXP SCREEN", 1.f, 0.8f, 0.2f, g_fontMainMenuLarge, g_dataMainMenuLarge);
 
     std::string killsTxt = "Total Kills: " + std::to_string(g_totalKills);
-    drawTextScreen(centerX - 100.f, winH * 0.35f, killsTxt, 1.f, 1.f, 1.f, g_fontMainMenuSmall, g_dataMainMenuSmall);
+    drawTextScreen(centerX - 120.f, winH * 0.35f, killsTxt, 1.f, 1.f, 1.f, g_fontMainMenuSmall, g_dataMainMenuSmall);
 
     // Buy Button
     float btnY = -0.1f;
@@ -544,7 +595,7 @@ void drawEXP(int winW, int winH, float mouseX, float mouseY, bool mousePressed, 
 
     std::string btnTxt = g_hasUpgradedGun ? "GUN UPGRADED!" : "UPGRADE GUN (10 KILLS)";
     float textPixelY = (1.f - (btnY + 1.f) * 0.5f) * winH;
-    drawTextScreen(centerX - 180.f, textPixelY + 20.f, btnTxt, 1.f, 1.f, 1.f, g_fontMainMenuSmall, g_dataMainMenuSmall);
+    drawTextScreen(centerX - 125.f, textPixelY + 10.f, btnTxt, 1.f, 1.f, 1.f, g_fontEXP, g_dataEXP);
 
     if (isHovered && mousePressed && !mouseWasPressed && !g_hasUpgradedGun && g_totalKills >= 10)
     {
@@ -563,7 +614,7 @@ void drawEXP(int winW, int winH, float mouseX, float mouseY, bool mousePressed, 
     glVertex2f(0.2f, backY + 0.08f);  glVertex2f(-0.2f, backY + 0.08f);
     glEnd();
     float backTextY = (1.f - (backY + 1.f) * 0.5f) * winH;
-    drawTextScreen(centerX - 45.f, backTextY + 15.f, "BACK", 1.f, 1.f, 1.f, g_fontMainMenuSmall, g_dataMainMenuSmall);
+    drawTextScreen(centerX - 35.f, backTextY + 10.f, "BACK", 1.f, 1.f, 1.f, g_fontEXP, g_dataEXP);
 
     if (backHovered && mousePressed && !mouseWasPressed)
     {
@@ -643,6 +694,7 @@ int main()
     g_fontMainMenuLarge = loadFont("arial.ttf", 80.f, g_dataMainMenuLarge);
     g_fontMainMenuSmall = loadFont("arial.ttf", 50.f, g_dataMainMenuSmall);
     g_fontTiny = loadFont("arial.ttf", 14.f, g_dataTiny);
+    g_fontEXP = loadFont("arial.ttf", 22.f, g_dataEXP);
 
     uint32_t inputSeq = 0;
     float lastTime = (float)glfwGetTime();
@@ -671,9 +723,37 @@ int main()
         static bool mouseWasPressed = false;
         bool mousePressed = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
 
+        bool tabPressed = isFocused && (glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS);
+        if (tabPressed && !g_tabWasPressed)
+        {
+            if (g_appState == AppState::IN_GAME)
+            {
+                if (g_isPaused) 
+                { 
+                    g_isPaused = false; 
+                    g_isTabbed = true; 
+                }
+                else 
+                    g_isTabbed = !g_isTabbed;
+            }
+            else if (g_appState == AppState::WAITING_ROOM)
+            {
+                g_isTabbed = !g_isTabbed;
+
+                if (g_isTabbed && g_isConnected) 
+                {
+                    char req = REQ_LEADERBOARD;
+                    sendAll(g_tcpSocket, &req, 1);
+                }
+            }
+        }
+        g_tabWasPressed = tabPressed;
+
         if (g_appState == AppState::MAIN_MENU)
         {
-            if (g_isConnected) DisconnectFromServer();
+            if (g_isConnected) 
+                DisconnectFromServer();
+
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
             drawMainMenu(winW, winH, mouseX, mouseY, mousePressed, mouseWasPressed);
         }
@@ -684,14 +764,14 @@ int main()
         }
         else if (g_appState == AppState::WAITING_ROOM)
         {
-            if (!g_isConnected) {
-                if (!ConnectToServer(serverIPStr)) {
-                    g_appState = AppState::MAIN_MENU;
-                }
-            }
+            if (!g_isConnected && !ConnectToServer(serverIPStr))
+                g_appState = AppState::MAIN_MENU;
 
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
             drawWaitingRoom(winW, winH, mouseX, mouseY, mousePressed, mouseWasPressed);
+
+            if (g_isTabbed) 
+                drawGlobalLeaderboard(winW, winH);
 
             // send heartbeat
             if (g_isConnected) {
@@ -706,10 +786,10 @@ int main()
         }
         else if (g_appState == AppState::IN_GAME)
         {
-            if (!g_isConnected) {
+            if (!g_isConnected)
                 g_appState = AppState::MAIN_MENU;
-            }
-            else {
+            else 
+            {
                 // chat detection enter
                 bool enterPressed = isFocused && (glfwGetKey(window, GLFW_KEY_ENTER) == GLFW_PRESS);
                 if (enterPressed && !g_enterWasPressed)
@@ -762,20 +842,6 @@ int main()
                         g_isPaused = !g_isPaused;
                 }
                 g_escWasPressed = escPressed;
-
-                // scoreboard detection tab
-                bool tabPressed = isFocused && (glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS);
-                if (tabPressed && !g_tabWasPressed)
-                {
-                    if (g_isPaused)
-                    {
-                        g_isPaused = false;
-                        g_isTabbed = true;
-                    }
-                    else
-                        g_isTabbed = !g_isTabbed;
-                }
-                g_tabWasPressed = tabPressed;
 
                 static bool PWasPressed = false;
                 bool PPressed = isFocused && (glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS);
@@ -837,6 +903,9 @@ int main()
                             quitSize = 0.06f;
                             if (mouseX >= -quitSize && mouseX <= quitSize && mouseY >= quitY - quitSize && mouseY <= quitY + quitSize)
                             {
+                                if (g_renderPlayers.count(g_myPlayerID))
+                                    g_totalKills += g_renderPlayers[g_myPlayerID].kills;
+
                                 g_appState = AppState::MAIN_MENU;
                                 g_isPaused = false;
                                 DisconnectFromServer();

@@ -19,12 +19,18 @@ stbtt_bakedchar g_dataPlayerName[96];
 GLuint g_fontTiny;
 stbtt_bakedchar g_dataTiny[96];
 
+GLuint g_fontEXP;
+stbtt_bakedchar g_dataEXP[96];
+
 GLuint g_fontMainMenuLarge, g_fontMainMenuSmall;
 stbtt_bakedchar g_dataMainMenuLarge[96], g_dataMainMenuSmall[96];
 
 std::atomic<bool> g_running{ true };
 SOCKET g_udpSocket = INVALID_SOCKET;
 inline SOCKET g_tcpSocket = INVALID_SOCKET;
+
+inline std::vector<std::pair<std::string, int>> g_globalLeaderboard;
+inline std::mutex g_lbMtx;
 
 enum class AppState {
     MAIN_MENU,
@@ -476,5 +482,43 @@ void drawScoreboard(int winW, int winH)
         drawTextScreen(centerX + 100.f, currentY, killStr, 1.0f, 0.8f, 0.2f, g_fontScoreboard, g_dataScoreboard);
 
         currentY += 40.f;
+    }
+}
+
+void drawGlobalLeaderboard(int winW, int winH)
+{
+    // Dark Overlay
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glColor4f(0.0f, 0.0f, 0.0f, 0.85f);
+    glBegin(GL_QUADS);
+    glVertex2f(-1.0f, -1.0f); glVertex2f(1.0f, -1.0f);
+    glVertex2f(1.0f, 1.0f); glVertex2f(-1.0f, 1.0f);
+    glEnd();
+    glDisable(GL_BLEND);
+
+    float centerX = winW * 0.5f;
+    float currentY = winH * 0.25f;
+
+    drawTextScreen(centerX - 280.f, currentY, "GLOBAL TOP 5 KILLS", 1.0f, 0.8f, 0.0f, g_fontScoreboardTitle, g_dataScoreboardTitle);
+    currentY += 80.f;
+
+    std::lock_guard<std::mutex> lock(g_lbMtx);
+    if (g_globalLeaderboard.empty())
+    {
+        drawTextScreen(centerX - 130.f, currentY, "No data or not connected...", 0.6f, 0.6f, 0.6f, g_fontScoreboard, g_dataScoreboard);
+    }
+    else
+    {
+        for (const auto& pair : g_globalLeaderboard)
+        {
+            std::string playerStr = pair.first;
+            std::string killStr = std::to_string(pair.second) + " Kills";
+
+            drawTextScreen(centerX - 150.f, currentY, playerStr, 1.0f, 1.0f, 1.0f, g_fontScoreboard, g_dataScoreboard);
+            drawTextScreen(centerX + 100.f, currentY, killStr, 1.0f, 0.8f, 0.2f, g_fontScoreboard, g_dataScoreboard);
+
+            currentY += 40.f;
+        }
     }
 }

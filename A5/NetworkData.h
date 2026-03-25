@@ -28,11 +28,17 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 #define REQ_CHEAT_WIN    (unsigned char)0x0A
 #define REQ_CHAT         (unsigned char)0x0B
 #define REQ_BUY_UPGRADE  (unsigned char)0x0C
+#define REQ_LEADERBOARD  (unsigned char)0x0D
 
 struct JoinResponse {
     uint32_t playerID;
     int32_t totalKills;
     uint8_t hasUpgradedGun; // use 1 byte explicitly
+};
+
+struct LeaderboardEntry {
+    char name[16];
+    int32_t totalKills;
 };
 
 struct PlayerState {

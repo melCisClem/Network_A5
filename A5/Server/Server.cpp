@@ -35,6 +35,7 @@ prior written consent of DigiPen Institute of Technology is prohibited.
 #include <fstream>
 #include <sstream>
 #include <map>
+#include <algorithm>
 
 #include "../NetworkData.h"
 
@@ -676,7 +677,7 @@ int main()
                             SyncPlayerFromDB(assignedID);
 
                             char ipStr[INET_ADDRSTRLEN];
-                            inet_ntop(AF_INET, &clientIP_net, ipStr, INET_ADDRSTRLEN);
+                            inet_ntop(AF_INET, &clientAddr.sin_addr, ipStr, INET_ADDRSTRLEN);
                             std::cout << "[Server] Player " << assignedID << " (" << g_players[assignedID].name 
                                       << ") joined from " << ipStr << ":" << ntohs(clientPort_net) << std::endl;
 
@@ -769,6 +770,39 @@ int main()
                                         }
                                     }
                                 }
+                                else if (cmdBuf[0] == REQ_LEADERBOARD)
+                                {
+                                    std::vector<std::pair<std::string, PlayerStats>> allStats;
+                                    {
+                                        std::lock_guard<std::mutex> dbLock(g_dbMtx);
+                                        for (const auto& pair : g_db) {
+                                            allStats.push_back(pair);
+                                        }
+                                    }
+
+                                    std::sort(allStats.begin(), allStats.end(), [](const auto& a, const auto& b) {
+                                        return a.second.totalKills > b.second.totalKills;
+                                        });
+
+                                    uint32_t count = (uint32_t)std::min((size_t)5, allStats.size());
+                                    uint32_t countNet = htonl(count);
+
+                                    std::vector<char> pkt;
+                                    pkt.push_back(REQ_LEADERBOARD);
+                                    pkt.insert(pkt.end(), reinterpret_cast<char*>(&countNet), reinterpret_cast<char*>(&countNet) + 4);
+
+                                    for (uint32_t i = 0; i < count; i++)
+                                    {
+                                        LeaderboardEntry entry;
+                                        strncpy_s(entry.name, allStats[i].first.c_str(), 15);
+                                        entry.name[15] = '\0';
+                                        entry.totalKills = htonl(allStats[i].second.totalKills);
+                                        pkt.insert(pkt.end(), reinterpret_cast<char*>(&entry), reinterpret_cast<char*>(&entry) + sizeof(entry));
+                                    }
+
+                                    sendAll(clientSocket, pkt.data(), (int)pkt.size());
+                                }
+
                             }
 
                             // Disconnect handling
