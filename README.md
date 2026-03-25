@@ -9,8 +9,11 @@ CSD2161 Assignment 5
 - Freetype 2
 
 ## Configuration & Setup
-1. **Server**: Run `Server.exe`. It will display your local IP Address (e.g., `192.168.1.10`).
-2. **Client**: Run `Client.exe` in same folder as Assets folder. 
+1. Open A5.sln in Visual Studio 2022 and go to the right hand side and open Solution Explorer
+2. Right click on Server and build, same with client
+3. In file explorer navigate out to the root folder (where readme.md and design document resides) and open the build folder that was generated
+4. **Server**: Run `Server.exe`. It will display your local IP Address.
+5. **Client**: Run `Client.exe`. 
    - When prompted, enter the Server's IP address. Pressing Enter will attempt to auto-fill the detected local IP.
    - Enter a unique player name (max 15 characters).
 
