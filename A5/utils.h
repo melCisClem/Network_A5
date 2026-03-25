@@ -1,4 +1,21 @@
-
+/* Start Header
+*****************************************************************/
+/*!
+\file utils.cpp
+\authors
+\   Lai Jun Jie Clement (junjieclement.lai@digipen.edu)
+\   Aryan bin Mohamed Isran (aryan.b@digipen.edu)
+\   Lee Hwee Min (l.hweemin@digipen.edu)
+\date 25/03/2026
+\brief
+\   utils file that stores global variables and functions to debloat client.cpp
+\
+Copyright (C) 2026 DigiPen Institute of Technology.
+Reproduction or disclosure of this file or its contents without the
+prior written consent of DigiPen Institute of Technology is prohibited.
+*/
+/* End Header
+*******************************************************************/
 
 #pragma once
 #include <iostream>
@@ -97,7 +114,8 @@ std::string FindAssetsFile(const std::string& filename)
     {
         if (FileExists(path))
         {
-            //std::cout << "Found " << filename << " at: " << path << "\n";
+            // only uncomment for debug else it bloats cli
+            //std::cout << "Found " << filename << " at: " << path << "\n"; 
             return path;
         }
     }
@@ -110,7 +128,8 @@ GLuint loadFont(const std::string& fontName, float pixelHeight, stbtt_bakedchar*
 {
     std::string fullPath = FindAssetsFile(fontName);
     FILE* fp;
-    if (fopen_s(&fp, fullPath.c_str(), "rb") != 0) return 0;
+    if (fopen_s(&fp, fullPath.c_str(), "rb") != 0) 
+        return 0;
 
     fseek(fp, 0, SEEK_END);
     long size = ftell(fp);
@@ -182,7 +201,6 @@ void drawTextScreen(float x, float y, const std::string& text, float r, float g,
     glPopMatrix();
 }
 
-
 void drawMap()
 {
     float cellW = 2.0f / MAP_WIDTH;
@@ -226,14 +244,14 @@ void drawTank(float x, float y, float r, float g, float b, float facingAngle, in
     glPushMatrix();
     glTranslatef(x, y, 0.0f);
 
-    // Draw HP n Cooldown bar
+    // Draw HP
     glPushMatrix();
     glTranslatef(0.0f, height + 0.04f, 0.0f); // hp bar above tank body
 
     float BarWidth = width * 0.9f;
     float BarHeight = hp_thickness;
 
-    // Draw Dark Background
+    // Dark Background
     glBegin(GL_QUADS);
     glColor3f(0.2f, 0.2f, 0.2f);
     glVertex2f(-BarWidth, -BarHeight);
@@ -242,10 +260,9 @@ void drawTank(float x, float y, float r, float g, float b, float facingAngle, in
     glVertex2f(-BarWidth, BarHeight);
     glEnd();
 
-    // Draw Red HP Bar
+    // Red HP Bar
     float hpPct = fmax(0.0f, (float)hp / (float)MAX_HP);
     float currentWidth = -BarWidth + (2.0f * BarWidth * hpPct);
-
     glBegin(GL_QUADS);
     glColor3f(0.9f, 0.1f, 0.1f);
     glVertex2f(-BarWidth, -BarHeight);
@@ -254,7 +271,7 @@ void drawTank(float x, float y, float r, float g, float b, float facingAngle, in
     glVertex2f(-BarWidth, BarHeight);
     glEnd();
 
-    // Draw Shoot Cooldown bar
+    // Shoot Cooldown bar
     float maxCD = (float)tank_shootCooldown;
     float cooldownPct = (maxCD - (float)cooldown) / maxCD;
 
@@ -265,7 +282,6 @@ void drawTank(float x, float y, float r, float g, float b, float facingAngle, in
     float cdY = -0.01f; // Positioned below HP bar
     float cdHeight = hp_thickness;
 
-    // Background
     glColor3f(0.1f, 0.1f, 0.1f); // Dark gray
     glBegin(GL_QUADS);
     glVertex2f(-BarWidth, cdY);
@@ -312,7 +328,8 @@ void drawTank(float x, float y, float r, float g, float b, float facingAngle, in
     glEnd();
 
     // draw outline only for local player
-    if (isLocalPlayer) {
+    if (isLocalPlayer) 
+    {
         glLineWidth(outline_thickness);
         glBegin(GL_LINE_LOOP);
         glColor3f(1.0f, 1.0f, 1.0f);
@@ -393,8 +410,6 @@ void drawPauseMenu(float g_currentVolume)
     glVertex2f(fillRight, barY + 0.02f); glVertex2f(-barHalfWidth, barY + 0.02f);
     glEnd();
 
-    // Circular Buttons with a small gap
-
     // Minus Button (Left)
     glColor3f(0.8f, 0.2f, 0.2f);
     float minusCenterX = -barHalfWidth - gap;
@@ -467,7 +482,6 @@ void drawScoreboard(int winW, int winH)
         }
     );
 
-    // draw Players
     std::lock_guard<std::mutex> lock(g_stateMtx);
     for (const auto& pair : sortedPlayers)
     {
@@ -505,9 +519,7 @@ void drawGlobalLeaderboard(int winW, int winH)
 
     std::lock_guard<std::mutex> lock(g_lbMtx);
     if (g_globalLeaderboard.empty())
-    {
         drawTextScreen(centerX - 130.f, currentY, "No data or not connected...", 0.6f, 0.6f, 0.6f, g_fontScoreboard, g_dataScoreboard);
-    }
     else
     {
         for (const auto& pair : g_globalLeaderboard)

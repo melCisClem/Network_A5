@@ -6,9 +6,9 @@
 \   Lai Jun Jie Clement (junjieclement.lai@digipen.edu)
 \   Aryan bin Mohamed Isran (aryan.b@digipen.edu)
 \   Lee Hwee Min (l.hweemin@digipen.edu)
-\par
-\date
+\date 25/03/2026
 \brief
+\   the server file
 \
 Copyright (C) 2026 DigiPen Institute of Technology.
 Reproduction or disclosure of this file or its contents without the
@@ -192,7 +192,8 @@ void ResetPlayerSpawn(int id)
                 break;
             }
         }
-        if (foundSpawn) break;
+        if (foundSpawn) 
+            break;
     }
 
     if (!foundSpawn)

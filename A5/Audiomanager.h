@@ -1,4 +1,21 @@
-
+/* Start Header
+*****************************************************************/
+/*!
+\file Audiomanager.h
+\authors
+\   Lai Jun Jie Clement (junjieclement.lai@digipen.edu)
+\   Aryan bin Mohamed Isran (aryan.b@digipen.edu)
+\   Lee Hwee Min (l.hweemin@digipen.edu)
+\date 25/03/2026
+\brief
+\   the audio manager file 
+\
+Copyright (C) 2026 DigiPen Institute of Technology.
+Reproduction or disclosure of this file or its contents without the
+prior written consent of DigiPen Institute of Technology is prohibited.
+*/
+/* End Header
+*******************************************************************/
 
 #pragma once
 #include <iostream>
@@ -6,7 +23,7 @@
 
 #include "utils.h"
 
-// supress warning from miniaudio the external library i use for audio
+// supress warning from miniaudio the external library
 #pragma warning(push)
 #pragma warning(disable: 4244)
 #pragma warning(disable: 4267)
@@ -30,7 +47,8 @@ public:
 
     ~AudioManager() 
     {
-        if (isBgmLoaded) ma_sound_uninit(&currentBGM);
+        if (isBgmLoaded) 
+            ma_sound_uninit(&currentBGM);
         ma_engine_uninit(&engine);
     }
 
