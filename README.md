@@ -19,7 +19,7 @@ CSD2161 Assignment 5
 - **A/D**: Turn Left / Right
 - **SPACE**: Shoot (0.5s cooldown)
 - **ENTER**: Toggle Chat (Type message and press Enter again to send)
-- **TAB**: Show Scoreboard
+- **TAB**: Show Scoreboard in game and Global Top 5 Leaderboard in waiting room
 - **ESC**: Pause Menu (Volume control / Quit)
 - **P**: Cheat Win (Instantly win the round)
 
