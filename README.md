@@ -10,7 +10,7 @@ CSD2161 Assignment 5
 
 ## Configuration & Setup
 1. **Server**: Run `Server.exe`. It will display your local IP Address (e.g., `192.168.1.10`).
-2. **Client**: Run `Client.exe`. 
+2. **Client**: Run `Client.exe` in same folder as Assets folder. 
    - When prompted, enter the Server's IP address. Pressing Enter will attempt to auto-fill the detected local IP.
    - Enter a unique player name (max 15 characters).
 
