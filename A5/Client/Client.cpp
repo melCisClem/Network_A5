@@ -276,10 +276,6 @@ void udpReceiverThread()
                 g_appState = AppState::IN_GAME;
             else if (matchState == 0 && g_appState == AppState::IN_GAME) 
             {
-                // Return to main menu as intended, but let the main thread handle DisconnectFromServer
-                if (g_renderPlayers.count(g_myPlayerID))
-                    g_totalKills += g_renderPlayers[g_myPlayerID].kills;
-
                 g_appState = AppState::MAIN_MENU;
                 g_isPaused = false;
                 g_isTabbed = false;
@@ -780,6 +776,9 @@ int main()
         }
         else if (g_appState == AppState::EXP_SCREEN)
         {
+            if (!g_isConnected && !ConnectToServer(serverIPStr))
+                g_appState = AppState::MAIN_MENU;
+
             glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
             drawEXP(winW, winH, mouseX, mouseY, mousePressed, mouseWasPressed);
         }
@@ -931,9 +930,6 @@ int main()
                             quitSize = 0.06f;
                             if (mouseX >= -quitSize && mouseX <= quitSize && mouseY >= quitY - quitSize && mouseY <= quitY + quitSize)
                             {
-                                if (g_renderPlayers.count(g_myPlayerID))
-                                    g_totalKills += g_renderPlayers[g_myPlayerID].kills;
-
                                 g_appState = AppState::MAIN_MENU;
                                 g_isPaused = false;
                                 DisconnectFromServer();

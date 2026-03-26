@@ -148,6 +148,7 @@ void SyncPlayerFromDB(int i)
         ps.totalKills = 0;
         ps.hasUpgradedGun = false;
         g_db[g_players[i].name] = ps;
+        SaveDB();
     }
 }
 
@@ -653,13 +654,29 @@ int main()
                     int assignedID = -1;
                     {
                         std::lock_guard<std::mutex> lk(g_stateMtx);
+                        nameBuf[15] = '\0';
+                        std::string requestedName(nameBuf);
 
-                        for (int i = 0; i < MAX_PLAYERS; i++) 
+                        // Check for duplicate names
+                        bool nameTaken = false;
+                        for (int i = 0; i < MAX_PLAYERS; i++)
                         {
-                            if (!g_players[i].connected) 
+                            if (g_players[i].connected && g_players[i].name == requestedName)
                             {
-                                assignedID = i;
+                                nameTaken = true;
                                 break;
+                            }
+                        }
+
+                        if (!nameTaken)
+                        {
+                            for (int i = 0; i < MAX_PLAYERS; i++)
+                            {
+                                if (!g_players[i].connected)
+                                {
+                                    assignedID = i;
+                                    break;
+                                }
                             }
                         }
 
@@ -671,8 +688,7 @@ int main()
                             g_players[assignedID].tcpSocket = clientSocket;
                             g_players[assignedID].connected = true;
 
-                            nameBuf[15] = '\0';
-                            g_players[assignedID].name = std::string(nameBuf);
+                            g_players[assignedID].name = requestedName;
 
                             // Load persistent stats for this player name
                             SyncPlayerFromDB(assignedID);
