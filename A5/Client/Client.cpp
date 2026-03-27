@@ -690,7 +690,7 @@ int main()
         g_playerName = nameInput;
 
     g_audio = new AudioManager();
-    g_audio->PlayBGM(ingame_BGM_audio);
+    g_audio->PlayBGM(mainmenu_BGM_audio);
 
     if (!glfwInit()) 
         return -1;
@@ -714,13 +714,22 @@ int main()
     g_fontEXP = loadFont("arial.ttf", 22.f, g_dataEXP);
 
     uint32_t inputSeq = 0;
-    float lastTime = (float)glfwGetTime();
+    float lastTime = (float)glfwGetTime(); 
+    
+    std::string activeBGM = mainmenu_BGM_audio;
 
     while (!glfwWindowShouldClose(window) && g_running) 
     {
         float currentTime = (float)glfwGetTime();
         float deltaTime = currentTime - lastTime;
         lastTime = currentTime;
+
+        std::string targetBGM = (g_appState == AppState::IN_GAME) ? ingame_BGM_audio : mainmenu_BGM_audio;
+        if (activeBGM != targetBGM)
+        {
+            activeBGM = targetBGM;
+            g_audio->PlayBGM(activeBGM);
+        }
 
         if (g_chatTimer > 0.0f)
             g_chatTimer = g_chatTimer - deltaTime;
