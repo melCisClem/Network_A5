@@ -112,10 +112,17 @@ void LoadDB()
                 std::getline(ss, killsStr, ',') && 
                 std::getline(ss, upStr, ','))
             {
-                PlayerStats ps;
-                ps.totalKills = std::stoi(killsStr);
-                ps.hasUpgradedGun = (std::stoi(upStr) == 1);
-                g_db[name] = ps;
+                try 
+                {
+                    PlayerStats ps;
+                    ps.totalKills = std::stoi(killsStr);
+                    ps.hasUpgradedGun = (std::stoi(upStr) == 1);
+                    g_db[name] = ps;
+                }
+                catch (...) 
+                {
+                    std::cerr << "[Server] Warning: Skipping corrupted DB entry for " << name << "\n";
+                }
             }
         }
         f.close();
@@ -133,23 +140,31 @@ void SyncPlayerToDB(int i)
 // Sync in-memory player state from the database map
 void SyncPlayerFromDB(int i)
 {
-    std::lock_guard<std::mutex> lock(g_dbMtx);
-    if (g_db.count(g_players[i].name))
+    bool isNewPlayer = false;
+
     {
-        g_players[i].totalKills = g_db[g_players[i].name].totalKills;
-        g_players[i].hasUpgradedGun = g_db[g_players[i].name].hasUpgradedGun;
+        std::lock_guard<std::mutex> lock(g_dbMtx);
+
+        if (g_db.count(g_players[i].name))
+        {
+            g_players[i].totalKills = g_db[g_players[i].name].totalKills;
+            g_players[i].hasUpgradedGun = g_db[g_players[i].name].hasUpgradedGun;
+        }
+        else
+        {
+            g_players[i].totalKills = 0;
+            g_players[i].hasUpgradedGun = false;
+
+            PlayerStats ps;
+            ps.totalKills = 0;
+            ps.hasUpgradedGun = false;
+            g_db[g_players[i].name] = ps;
+
+            isNewPlayer = true;
+        }
     }
-    else
-    {
-        g_players[i].totalKills = 0;
-        g_players[i].hasUpgradedGun = false;
-        
-        PlayerStats ps;
-        ps.totalKills = 0;
-        ps.hasUpgradedGun = false;
-        g_db[g_players[i].name] = ps;
+    if (isNewPlayer)
         SaveDB();
-    }
 }
 
 // Projectile structure
@@ -497,7 +512,7 @@ void serverGameLoop()
                 {
                     PlayerState ps;
                     ps.playerID = htonl(i);
-                    strncpy_s(ps.name, g_players[i].name.c_str(), 15);
+                    strncpy_s(ps.name, g_players[i].name.c_str(), _TRUNCATE);
                     ps.x = g_players[i].x;
                     ps.y = g_players[i].y;
                     ps.aimAngle = g_players[i].aimAngle;
@@ -811,7 +826,7 @@ int main()
                                     for (uint32_t i = 0; i < count; i++)
                                     {
                                         LeaderboardEntry entry;
-                                        strncpy_s(entry.name, allStats[i].first.c_str(), 15);
+                                        strncpy_s(entry.name, allStats[i].first.c_str(), _TRUNCATE);
                                         entry.name[15] = '\0';
                                         entry.totalKills = htonl(allStats[i].second.totalKills);
                                         pkt.insert(pkt.end(), reinterpret_cast<char*>(&entry), reinterpret_cast<char*>(&entry) + sizeof(entry));

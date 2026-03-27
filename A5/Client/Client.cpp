@@ -403,7 +403,7 @@ bool ConnectToServer(const std::string& serverIPStr)
     msg.push_back(REQ_JOIN);
 
     char nameBuf[16] = { 0 };
-    strncpy_s(nameBuf, g_playerName.c_str(), 15);
+    strncpy_s(nameBuf, g_playerName.c_str(), _TRUNCATE);
     msg.insert(msg.end(), nameBuf, nameBuf + 16);
 
     uint32_t zeroIp = 0;
